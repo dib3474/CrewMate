@@ -1,0 +1,223 @@
+// === 공유 계약 기반 타입 정의 ===
+
+// 역할
+export type UserRole = 'WORKER' | 'OFFICE' | 'COMPANY';
+
+// 근로자 상태
+export type WorkerState = 'INACTIVE' | 'READY' | 'RESERVED' | 'RUNNING';
+
+// 요청 상태
+export type WorkRequestStatus =
+  | 'REQUESTED'
+  | 'COMPOSING'
+  | 'PROPOSED'
+  | 'APPROVED'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'CANCELLED';
+
+// 작업조 상태
+export type CrewStatus =
+  | 'DRAFT'
+  | 'PROPOSED'
+  | 'APPROVED'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'CANCELLED';
+
+// 결원 이벤트 상태
+export type GapEventStatus =
+  | 'DETECTED'
+  | 'RECOMPOSING'
+  | 'PROPOSED'
+  | 'APPROVED'
+  | 'FILLED'
+  | 'FAILED';
+
+// 결원 유형
+export type GapEventType = 'NO_SHOW' | 'LEFT_SITE' | 'UNAVAILABLE';
+
+// 직종
+export type Trade =
+  | 'FORMWORK'
+  | 'REBAR'
+  | 'MASONRY'
+  | 'MATERIAL_CARRY'
+  | 'GENERAL';
+
+// 우선순위 레벨
+export type PriorityLevel = 'HIGH' | 'MEDIUM' | 'LOW';
+
+// === API 응답 형식 ===
+
+export interface ApiSuccessResponse<T> {
+  success: true;
+  data: T;
+}
+
+export interface ApiErrorResponse {
+  success: false;
+  error: {
+    code: string;
+    message: string;
+  };
+}
+
+export type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
+
+// === 엔터티 ===
+
+export interface Worker {
+  worker_id: string;
+  user_id: string;
+  name: string;
+  phone: string;
+  office_id: string;
+  state: WorkerState;
+  trade: Trade;
+  skill_level: number;
+  career_years: number;
+  age: number;
+  region: string;
+  desired_daily_wage: number;
+  certifications: string[];
+  completed_count: number;
+  no_show_count: number;
+  current_crew_id: string | null;
+  state_changed_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RequiredWorker {
+  trade: Trade;
+  count: number;
+}
+
+export interface Priority {
+  cost: PriorityLevel;
+  skill: PriorityLevel;
+  teamwork: PriorityLevel;
+}
+
+export interface WorkRequest {
+  request_id: string;
+  company_id: string;
+  office_id: string;
+  site_name: string;
+  work_date: string;
+  start_time: string;
+  location_text: string;
+  required_workers: RequiredWorker[];
+  budget: number;
+  priority: Priority;
+  notes: string;
+  status: WorkRequestStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CrewMember {
+  worker_id: string;
+  name: string;
+  trade: Trade;
+  skill_level: number;
+  desired_daily_wage: number;
+}
+
+export interface Recommendation {
+  rank: number;
+  member_ids: string[];
+  members: CrewMember[];
+  total_cost: number;
+  reason: string;
+  considerations: string[];
+}
+
+export interface Crew {
+  crew_id: string;
+  request_id: string;
+  office_id: string;
+  status: CrewStatus;
+  source: 'MANUAL' | 'AGENT';
+  member_ids: string[];
+  members: CrewMember[];
+  recommendations?: Recommendation[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GapEvent {
+  event_id: string;
+  crew_id: string;
+  request_id: string;
+  office_id: string;
+  type: GapEventType;
+  affected_worker_id: string;
+  status: GapEventStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Notification {
+  id: string;
+  user_id: string;
+  type: string;
+  title: string;
+  message: string;
+  read: boolean;
+  created_at: string;
+}
+
+// === 인증 ===
+
+export interface AuthUser {
+  userId: string;
+  role: UserRole;
+  name: string;
+  token: string;
+}
+
+export interface LoginRequest {
+  username: string;
+  password: string;
+}
+
+export interface LoginResponse {
+  user: AuthUser;
+}
+
+// === Worker API 요청 ===
+
+export interface WorkerApplicationRequest {
+  name: string;
+  phone: string;
+  office_id: string;
+  trade: Trade;
+  skill_level: number;
+  career_years: number;
+  age: number;
+  region: string;
+  desired_daily_wage: number;
+  certifications: string[];
+  introduction?: string;
+}
+
+// === Company API 요청 ===
+
+export interface CreateWorkRequestPayload {
+  office_id: string;
+  site_name: string;
+  work_date: string;
+  start_time: string;
+  location_text: string;
+  required_workers: RequiredWorker[];
+  budget: number;
+  priority: Priority;
+  notes: string;
+}
+
+export interface CreateGapEventPayload {
+  type: GapEventType;
+  affected_worker_id: string;
+}
