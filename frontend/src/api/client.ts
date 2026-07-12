@@ -4,12 +4,13 @@ const API_MODE = import.meta.env.VITE_API_MODE || 'mock';
 const API_URL = import.meta.env.VITE_API_URL || '';
 
 // mock 핸들러를 동적으로 임포트
-let mockHandlers: Record<string, (body?: unknown) => Promise<ApiResponse<unknown>>> = {};
+type MockHandler = (body?: unknown, pathParam?: string) => Promise<ApiResponse<unknown>>;
+let mockHandlers: Record<string, MockHandler> = {};
 
 async function getMockHandlers() {
   if (Object.keys(mockHandlers).length === 0) {
     const mod = await import('./mock');
-    mockHandlers = mod.handlers;
+    mockHandlers = mod.handlers as Record<string, MockHandler>;
   }
   return mockHandlers;
 }
@@ -40,11 +41,11 @@ export async function apiRequest<T>(
       return handlers[key](body) as Promise<ApiResponse<T>>;
     }
 
-    // 패턴 매칭 시도 (경로 파라미터)
+    // 패턴 매칭 시도 (경로 파라미터 추출)
     for (const [pattern, handler] of Object.entries(handlers)) {
-      const regex = patternToRegex(pattern);
-      if (regex.test(key)) {
-        return handler(body) as Promise<ApiResponse<T>>;
+      const match = matchPattern(pattern, key);
+      if (match) {
+        return handler(body, match.param) as Promise<ApiResponse<T>>;
       }
     }
 
@@ -71,11 +72,21 @@ export async function apiRequest<T>(
   return response.json() as Promise<ApiResponse<T>>;
 }
 
-// 경로 패턴을 정규식으로 변환 (예: GET /company/requests/{id} → regex)
-function patternToRegex(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const withParams = escaped.replace(/\\{[^}]+\\}/g, '[^/]+');
-  return new RegExp(`^${withParams}$`);
+// 경로 패턴 매칭 + 파라미터 추출
+function matchPattern(pattern: string, actual: string): { param?: string } | null {
+  // pattern: "GET /company/requests/{id}"
+  // actual:  "GET /company/requests/REQ001"
+  const paramMatch = pattern.match(/\{([^}]+)\}/);
+  if (!paramMatch) return null;
+
+  const regex = new RegExp(
+    '^' + pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\{[^}]+\\}/g, '([^/]+)') + '$'
+  );
+  const result = actual.match(regex);
+  if (result) {
+    return { param: result[1] };
+  }
+  return null;
 }
 
 // 편의 함수

@@ -1,10 +1,111 @@
+import { useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { api } from '../../api/client';
+import { usePolling } from '../../hooks/usePolling';
+import type { WorkRequest, WorkRequestStatus } from '../../api/types';
+
+const STATUS_CONFIG: Record<WorkRequestStatus, { label: string; color: string }> = {
+  REQUESTED: { label: '요청됨', color: 'bg-yellow-100 text-yellow-700' },
+  COMPOSING: { label: '편성 중', color: 'bg-purple-100 text-purple-700' },
+  PROPOSED: { label: '추천 완료', color: 'bg-indigo-100 text-indigo-700' },
+  APPROVED: { label: '승인됨', color: 'bg-blue-100 text-blue-700' },
+  RUNNING: { label: '작업 중', color: 'bg-orange-100 text-orange-700' },
+  COMPLETED: { label: '완료', color: 'bg-green-100 text-green-700' },
+  CANCELLED: { label: '취소', color: 'bg-gray-100 text-gray-500' },
+};
+
+const TRADE_LABEL: Record<string, string> = {
+  FORMWORK: '형틀목공',
+  REBAR: '철근공',
+  MASONRY: '조적공',
+  MATERIAL_CARRY: '자재운반',
+  GENERAL: '보통인부',
+};
+
 export default function CompanyHomePage() {
+  const navigate = useNavigate();
+
+  const fetchRequests = useCallback(async () => {
+    const res = await api.get<WorkRequest[]>('/company/requests');
+    if (res.success) return res.data;
+    return [];
+  }, []);
+
+  const { data: requests, loading } = usePolling<WorkRequest[]>({
+    fetchFn: fetchRequests,
+    interval: 5000,
+  });
+
   return (
-    <div className="max-w-4xl mx-auto">
-      <h2 className="text-xl font-semibold text-gray-800 mb-4">건설사 대시보드</h2>
-      <div className="bg-white rounded-lg border border-gray-200 p-6">
-        <p className="text-gray-500">Day 2에서 인력 요청 생성, 요청 목록 화면을 구현합니다.</p>
+    <div className="max-w-4xl mx-auto space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold text-gray-800">인력 요청 관리</h2>
+        <button
+          onClick={() => navigate('/company/requests/new')}
+          className="bg-orange-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-orange-700 transition-colors"
+        >
+          + 새 요청
+        </button>
       </div>
+
+      {loading && !requests && (
+        <div className="bg-white rounded-lg border border-gray-200 p-6 text-center">
+          <p className="text-gray-400">불러오는 중...</p>
+        </div>
+      )}
+
+      {requests && requests.length === 0 && (
+        <div className="bg-white rounded-lg border border-gray-200 p-10 text-center">
+          <p className="text-gray-500 mb-3">등록된 인력 요청이 없습니다.</p>
+          <button
+            onClick={() => navigate('/company/requests/new')}
+            className="text-orange-600 text-sm hover:underline"
+          >
+            첫 요청을 만들어보세요 →
+          </button>
+        </div>
+      )}
+
+      {requests && requests.length > 0 && (
+        <div className="space-y-3">
+          {requests.map((req) => {
+            const statusInfo = STATUS_CONFIG[req.status];
+            const totalWorkers = req.required_workers.reduce((s, w) => s + w.count, 0);
+
+            return (
+              <div
+                key={req.request_id}
+                onClick={() => navigate(`/company/requests/${req.request_id}`)}
+                className="bg-white rounded-lg border border-gray-200 p-5 hover:border-orange-300 hover:shadow-sm cursor-pointer transition-all"
+              >
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <h3 className="font-medium text-gray-800">{req.site_name}</h3>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${statusInfo.color}`}>
+                        {statusInfo.label}
+                      </span>
+                    </div>
+                    <p className="text-sm text-gray-500">{req.location_text}</p>
+                  </div>
+                  <div className="text-right text-sm">
+                    <p className="text-gray-800 font-medium">{req.work_date}</p>
+                    <p className="text-gray-400">{req.start_time}</p>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex items-center gap-4 text-xs text-gray-500">
+                  <span>필요 인원: {totalWorkers}명</span>
+                  <span>
+                    {req.required_workers.map((w) => `${TRADE_LABEL[w.trade] || w.trade} ${w.count}명`).join(', ')}
+                  </span>
+                  <span className="ml-auto">예산: {req.budget.toLocaleString()}원</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

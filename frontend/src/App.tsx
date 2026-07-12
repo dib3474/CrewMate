@@ -3,9 +3,19 @@ import { AuthProvider } from './auth/AuthContext';
 import LoginPage from './auth/LoginPage';
 import RoleGuard from './auth/RoleGuard';
 import Layout from './components/Layout';
+
+// Worker pages
 import WorkerHomePage from './pages/worker/HomePage';
+import WorkerApplicationPage from './pages/worker/ApplicationPage';
+import WorkerAssignmentsPage from './pages/worker/AssignmentsPage';
+
+// Office pages
 import OfficeHomePage from './pages/office/HomePage';
+
+// Company pages
 import CompanyHomePage from './pages/company/HomePage';
+import CompanyCreateRequestPage from './pages/company/CreateRequestPage';
+import CompanyRequestDetailPage from './pages/company/RequestDetailPage';
 
 export default function App() {
   return (
@@ -25,6 +35,8 @@ export default function App() {
             }
           >
             <Route index element={<WorkerHomePage />} />
+            <Route path="application" element={<WorkerApplicationPage />} />
+            <Route path="assignments" element={<WorkerAssignmentsPage />} />
           </Route>
 
           {/* 인력사무소 */}
@@ -49,6 +61,8 @@ export default function App() {
             }
           >
             <Route index element={<CompanyHomePage />} />
+            <Route path="requests/new" element={<CompanyCreateRequestPage />} />
+            <Route path="requests/:requestId" element={<CompanyRequestDetailPage />} />
           </Route>
 
           {/* 기본 리다이렉트 */}
