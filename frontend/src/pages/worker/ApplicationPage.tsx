@@ -24,7 +24,8 @@ export default function ApplicationPage() {
     name: '',
     phone: '',
     office_id: 'OFFICE001',
-    trade: 'GENERAL',
+    preferred_trades: [],
+    excluded_trades: [],
     skill_level: 3,
     career_years: 0,
     age: 20,
@@ -35,7 +36,6 @@ export default function ApplicationPage() {
   });
   const [certInput, setCertInput] = useState('');
 
-  // 기존 데이터 불러오기
   useEffect(() => {
     (async () => {
       const res = await api.get<Worker>('/worker/me');
@@ -46,7 +46,8 @@ export default function ApplicationPage() {
           name: w.name,
           phone: w.phone,
           office_id: w.office_id,
-          trade: w.trade,
+          preferred_trades: w.preferred_trades,
+          excluded_trades: w.excluded_trades,
           skill_level: w.skill_level,
           career_years: w.career_years,
           age: w.age,
@@ -60,17 +61,41 @@ export default function ApplicationPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (form.preferred_trades.length === 0) {
+      alert('희망 직종을 최소 1개 이상 선택해주세요.');
+      return;
+    }
     setLoading(true);
-
     const method = isEdit ? api.put : api.post;
     const res = await method<Worker>('/worker/application', form);
-
     setLoading(false);
+    if (res.success) navigate('/worker');
+    else alert(res.error.message);
+  };
 
-    if (res.success) {
-      navigate('/worker');
+  const togglePreferred = (trade: Trade) => {
+    if (form.preferred_trades.includes(trade)) {
+      setForm({ ...form, preferred_trades: form.preferred_trades.filter((t) => t !== trade) });
     } else {
-      alert(res.error.message);
+      // 비희망에서 제거하고 희망에 추가
+      setForm({
+        ...form,
+        preferred_trades: [...form.preferred_trades, trade],
+        excluded_trades: form.excluded_trades.filter((t) => t !== trade),
+      });
+    }
+  };
+
+  const toggleExcluded = (trade: Trade) => {
+    if (form.excluded_trades.includes(trade)) {
+      setForm({ ...form, excluded_trades: form.excluded_trades.filter((t) => t !== trade) });
+    } else {
+      // 희망에서 제거하고 비희망에 추가
+      setForm({
+        ...form,
+        excluded_trades: [...form.excluded_trades, trade],
+        preferred_trades: form.preferred_trades.filter((t) => t !== trade),
+      });
     }
   };
 
@@ -95,146 +120,121 @@ export default function ApplicationPage() {
         {/* 이름 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">이름 *</label>
-          <input
-            type="text"
-            required
-            value={form.name}
+          <input type="text" required value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
             className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-            placeholder="홍길동"
-          />
+            placeholder="홍길동" />
         </div>
 
         {/* 전화번호 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">전화번호 *</label>
-          <input
-            type="tel"
-            required
-            value={form.phone}
+          <input type="tel" required value={form.phone}
             onChange={(e) => setForm({ ...form, phone: e.target.value })}
             className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-            placeholder="010-1234-5678"
-          />
+            placeholder="010-1234-5678" />
         </div>
 
         {/* 인력사무소 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">인력사무소 *</label>
-          <select
-            value={form.office_id}
+          <select value={form.office_id}
             onChange={(e) => setForm({ ...form, office_id: e.target.value })}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-          >
-            {OFFICE_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+            {OFFICE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
         </div>
 
-        {/* 분야 */}
+        {/* 희망 직종 (복수 선택) */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">분야 (직종) *</label>
-          <select
-            value={form.trade}
-            onChange={(e) => setForm({ ...form, trade: e.target.value as Trade })}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-          >
-            {TRADE_OPTIONS.map((t) => (
-              <option key={t.value} value={t.value}>{t.label}</option>
-            ))}
-          </select>
+          <label className="block text-sm font-medium text-gray-700 mb-2">희망 직종 * <span className="text-gray-400 font-normal">(복수 선택 가능)</span></label>
+          <div className="flex flex-wrap gap-2">
+            {TRADE_OPTIONS.map((t) => {
+              const isPreferred = form.preferred_trades.includes(t.value);
+              return (
+                <button key={t.value} type="button" onClick={() => togglePreferred(t.value)}
+                  className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${
+                    isPreferred ? 'bg-green-600 text-white border-green-600' : 'bg-white text-gray-700 border-gray-300 hover:border-green-400'
+                  }`}>
+                  {isPreferred && '✓ '}{t.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 비희망 직종 (복수 선택) */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">비희망 직종 <span className="text-gray-400 font-normal">(이 직종으로는 편성되지 않습니다)</span></label>
+          <div className="flex flex-wrap gap-2">
+            {TRADE_OPTIONS.map((t) => {
+              const isExcluded = form.excluded_trades.includes(t.value);
+              return (
+                <button key={t.value} type="button" onClick={() => toggleExcluded(t.value)}
+                  className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${
+                    isExcluded ? 'bg-red-600 text-white border-red-600' : 'bg-white text-gray-700 border-gray-300 hover:border-red-400'
+                  }`}>
+                  {isExcluded && '✕ '}{t.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         {/* 숙련도 */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            숙련도 * <span className="text-gray-400">(1~5)</span>
-          </label>
-          <input
-            type="number"
-            min={1}
-            max={5}
-            required
-            value={form.skill_level}
+          <label className="block text-sm font-medium text-gray-700 mb-1">숙련도 * <span className="text-gray-400">(1~5)</span></label>
+          <input type="number" min={1} max={5} required value={form.skill_level}
             onChange={(e) => setForm({ ...form, skill_level: Number(e.target.value) })}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-          />
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500" />
         </div>
 
-        {/* 경력 연차 */}
+        {/* 경력 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">경력 (년) *</label>
-          <input
-            type="number"
-            min={0}
-            required
-            value={form.career_years}
+          <input type="number" min={0} required value={form.career_years}
             onChange={(e) => setForm({ ...form, career_years: Number(e.target.value) })}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-          />
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500" />
         </div>
 
         {/* 나이 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">나이 *</label>
-          <input
-            type="number"
-            min={18}
-            max={70}
-            required
-            value={form.age}
+          <input type="number" min={18} max={70} required value={form.age}
             onChange={(e) => setForm({ ...form, age: Number(e.target.value) })}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-          />
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500" />
         </div>
 
         {/* 지역 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">지역 *</label>
-          <input
-            type="text"
-            required
-            value={form.region}
+          <input type="text" required value={form.region}
             onChange={(e) => setForm({ ...form, region: e.target.value })}
             className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-            placeholder="부산 해운대구"
-          />
+            placeholder="부산 해운대구" />
         </div>
 
-        {/* 희망 일당 */}
+        {/* 희망 일당 — 직접 입력 + 위아래 버튼 유지 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">희망 일당 (원) *</label>
-          <input
-            type="number"
-            min={100000}
-            step={10000}
-            required
+          <input type="number" min={0} step={10000} required
             value={form.desired_daily_wage}
             onChange={(e) => setForm({ ...form, desired_daily_wage: Number(e.target.value) })}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-          />
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500" />
+          <p className="text-xs text-gray-400 mt-1">{form.desired_daily_wage.toLocaleString()}원 (직접 입력 가능)</p>
         </div>
 
         {/* 자격증 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">자격증</label>
           <div className="flex gap-2">
-            <input
-              type="text"
-              value={certInput}
+            <input type="text" value={certInput}
               onChange={(e) => setCertInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCertification(); } }}
               className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-              placeholder="자격증명 입력 후 추가"
-            />
-            <button
-              type="button"
-              onClick={addCertification}
-              className="px-3 py-2 bg-gray-100 text-gray-700 rounded-md text-sm hover:bg-gray-200"
-            >
-              추가
-            </button>
+              placeholder="자격증명 입력 후 추가" />
+            <button type="button" onClick={addCertification}
+              className="px-3 py-2 bg-gray-100 text-gray-700 rounded-md text-sm hover:bg-gray-200">추가</button>
           </div>
           {form.certifications.length > 0 && (
             <div className="flex flex-wrap gap-2 mt-2">
@@ -251,29 +251,21 @@ export default function ApplicationPage() {
         {/* 자기소개 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">자기소개</label>
-          <textarea
-            value={form.introduction || ''}
+          <textarea value={form.introduction || ''}
             onChange={(e) => setForm({ ...form, introduction: e.target.value })}
             rows={3}
             className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
-            placeholder="간단한 자기소개를 입력해주세요."
-          />
+            placeholder="간단한 자기소개를 입력해주세요." />
         </div>
 
         {/* 제출 */}
         <div className="flex gap-3 pt-2">
-          <button
-            type="submit"
-            disabled={loading}
-            className="flex-1 bg-green-600 text-white py-2.5 rounded-md text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
-          >
+          <button type="submit" disabled={loading}
+            className="flex-1 bg-green-600 text-white py-2.5 rounded-md text-sm font-medium hover:bg-green-700 disabled:opacity-50 transition-colors">
             {loading ? '저장 중...' : isEdit ? '수정 완료' : '지원서 제출'}
           </button>
-          <button
-            type="button"
-            onClick={() => navigate('/worker')}
-            className="px-4 py-2.5 border border-gray-300 text-gray-700 rounded-md text-sm hover:bg-gray-50 transition-colors"
-          >
+          <button type="button" onClick={() => navigate('/worker')}
+            className="px-4 py-2.5 border border-gray-300 text-gray-700 rounded-md text-sm hover:bg-gray-50 transition-colors">
             취소
           </button>
         </div>

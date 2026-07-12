@@ -24,7 +24,8 @@ const TRADE_LABEL: Record<string, string> = {
 const STATE_CONFIG: Record<WorkerState, { label: string; color: string }> = {
   INACTIVE: { label: '비활성', color: 'bg-gray-100 text-gray-600' },
   READY: { label: '대기 중', color: 'bg-green-100 text-green-700' },
-  RESERVED: { label: '배정 확정', color: 'bg-blue-100 text-blue-700' },
+  NOTIFIED: { label: '제안 중', color: 'bg-purple-100 text-purple-700' },
+  RESERVED: { label: '배차 확정', color: 'bg-blue-100 text-blue-700' },
   RUNNING: { label: '작업 중', color: 'bg-orange-100 text-orange-700' },
 };
 
@@ -48,7 +49,7 @@ export default function WorkersPage() {
 
   const filtered = (workers || []).filter((w) => {
     if (filterState && w.state !== filterState) return false;
-    if (filterTrade && w.trade !== filterTrade) return false;
+    if (filterTrade && !w.preferred_trades.includes(filterTrade)) return false;
     if (w.skill_level < filterMinSkill) return false;
     if (w.desired_daily_wage > filterMaxWage) return false;
     return true;
@@ -125,7 +126,7 @@ export default function WorkersPage() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 text-gray-500 font-medium">이름</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">직종</th>
+                <th className="text-left px-4 py-3 text-gray-500 font-medium">희망 직종</th>
                 <th className="text-center px-4 py-3 text-gray-500 font-medium">숙련</th>
                 <th className="text-right px-4 py-3 text-gray-500 font-medium">희망 일당</th>
                 <th className="text-left px-4 py-3 text-gray-500 font-medium">지역</th>
@@ -138,7 +139,13 @@ export default function WorkersPage() {
                 return (
                   <tr key={w.worker_id} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium text-gray-800">{w.name}</td>
-                    <td className="px-4 py-3 text-gray-600">{TRADE_LABEL[w.trade] || w.trade}</td>
+                    <td className="px-4 py-3 text-gray-600">
+                      <div className="flex flex-wrap gap-1">
+                        {w.preferred_trades.map((t) => (
+                          <span key={t} className="text-xs bg-green-50 text-green-700 px-1.5 py-0.5 rounded">{TRADE_LABEL[t]}</span>
+                        ))}
+                      </div>
+                    </td>
                     <td className="px-4 py-3 text-center text-gray-600">{'★'.repeat(w.skill_level)}</td>
                     <td className="px-4 py-3 text-right text-gray-600">{w.desired_daily_wage.toLocaleString()}원</td>
                     <td className="px-4 py-3 text-gray-600">{w.region}</td>

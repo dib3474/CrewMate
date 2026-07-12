@@ -4,7 +4,11 @@
 export type UserRole = 'WORKER' | 'OFFICE' | 'COMPANY';
 
 // 근로자 상태
-export type WorkerState = 'INACTIVE' | 'READY' | 'RESERVED' | 'RUNNING';
+// INACTIVE → READY → NOTIFIED → RESERVED → RUNNING → INACTIVE
+export type WorkerState = 'INACTIVE' | 'READY' | 'NOTIFIED' | 'RESERVED' | 'RUNNING';
+
+// 수락 상태
+export type AcceptanceStatus = 'PENDING' | 'ACCEPTED' | 'DECLINED';
 
 // 요청 상태
 export type WorkRequestStatus =
@@ -12,6 +16,7 @@ export type WorkRequestStatus =
   | 'COMPOSING'
   | 'PROPOSED'
   | 'APPROVED'
+  | 'DISPATCHED'
   | 'RUNNING'
   | 'COMPLETED'
   | 'CANCELLED';
@@ -21,6 +26,8 @@ export type CrewStatus =
   | 'DRAFT'
   | 'PROPOSED'
   | 'APPROVED'
+  | 'NOTIFIED'
+  | 'DISPATCHED'
   | 'RUNNING'
   | 'COMPLETED'
   | 'CANCELLED';
@@ -35,7 +42,7 @@ export type GapEventStatus =
   | 'FAILED';
 
 // 결원 유형
-export type GapEventType = 'NO_SHOW' | 'LEFT_SITE' | 'UNAVAILABLE';
+export type GapEventType = 'NO_SHOW' | 'LEFT_SITE' | 'UNAVAILABLE' | 'DECLINED';
 
 // 직종
 export type Trade =
@@ -74,7 +81,9 @@ export interface Worker {
   phone: string;
   office_id: string;
   state: WorkerState;
-  trade: Trade;
+  // 직종: 단일이 아닌 희망/비희망 복수 선택
+  preferred_trades: Trade[];
+  excluded_trades: Trade[];
   skill_level: number;
   career_years: number;
   age: number;
@@ -84,6 +93,16 @@ export interface Worker {
   completed_count: number;
   no_show_count: number;
   current_crew_id: string | null;
+  // 현재 배정 제안 정보 (NOTIFIED 상태일 때)
+  current_offer?: {
+    crew_id: string;
+    assigned_trade: Trade;
+    offered_wage: number;
+    site_name: string;
+    work_date: string;
+    start_time: string;
+    location_text: string;
+  } | null;
   state_changed_at: string;
   created_at: string;
   updated_at: string;
@@ -120,9 +139,10 @@ export interface WorkRequest {
 export interface CrewMember {
   worker_id: string;
   name: string;
-  trade: Trade;
+  assigned_trade: Trade;
   skill_level: number;
-  desired_daily_wage: number;
+  offered_wage: number;
+  acceptance: AcceptanceStatus;
 }
 
 export interface Recommendation {
@@ -193,7 +213,8 @@ export interface WorkerApplicationRequest {
   name: string;
   phone: string;
   office_id: string;
-  trade: Trade;
+  preferred_trades: Trade[];
+  excluded_trades: Trade[];
   skill_level: number;
   career_years: number;
   age: number;

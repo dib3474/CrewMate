@@ -39,7 +39,7 @@ export const SEED_ACCOUNTS: Record<string, { password: string; user: AuthUser }>
   },
 };
 
-// 메모리 상태 — 시나리오 진행용
+// 메모리 상태
 export interface MockState {
   workers: Worker[];
   requests: WorkRequest[];
@@ -48,7 +48,7 @@ export interface MockState {
   notifications: Notification[];
 }
 
-// 시드 근로자 데이터
+// 시드 근로자 데이터 (새 필드 반영)
 const SEED_WORKERS: Worker[] = [
   {
     worker_id: 'W001',
@@ -57,7 +57,8 @@ const SEED_WORKERS: Worker[] = [
     phone: '010-1234-5678',
     office_id: 'OFFICE001',
     state: 'INACTIVE',
-    trade: 'FORMWORK',
+    preferred_trades: ['FORMWORK', 'MASONRY'],
+    excluded_trades: ['MATERIAL_CARRY'],
     skill_level: 4,
     career_years: 8,
     age: 35,
@@ -67,6 +68,7 @@ const SEED_WORKERS: Worker[] = [
     completed_count: 42,
     no_show_count: 0,
     current_crew_id: null,
+    current_offer: null,
     state_changed_at: '2026-07-10T08:00:00Z',
     created_at: '2026-01-15T09:00:00Z',
     updated_at: '2026-07-10T08:00:00Z',
@@ -78,7 +80,8 @@ const SEED_WORKERS: Worker[] = [
     phone: '010-2345-6789',
     office_id: 'OFFICE001',
     state: 'READY',
-    trade: 'REBAR',
+    preferred_trades: ['REBAR', 'GENERAL'],
+    excluded_trades: [],
     skill_level: 3,
     career_years: 5,
     age: 29,
@@ -88,6 +91,7 @@ const SEED_WORKERS: Worker[] = [
     completed_count: 28,
     no_show_count: 1,
     current_crew_id: null,
+    current_offer: null,
     state_changed_at: '2026-07-11T07:00:00Z',
     created_at: '2026-03-10T09:00:00Z',
     updated_at: '2026-07-11T07:00:00Z',
@@ -99,7 +103,8 @@ const SEED_WORKERS: Worker[] = [
     phone: '010-3456-7890',
     office_id: 'OFFICE001',
     state: 'READY',
-    trade: 'GENERAL',
+    preferred_trades: ['GENERAL', 'FORMWORK'],
+    excluded_trades: ['REBAR'],
     skill_level: 4,
     career_years: 10,
     age: 41,
@@ -109,6 +114,7 @@ const SEED_WORKERS: Worker[] = [
     completed_count: 56,
     no_show_count: 0,
     current_crew_id: null,
+    current_offer: null,
     state_changed_at: '2026-07-11T06:30:00Z',
     created_at: '2026-02-01T09:00:00Z',
     updated_at: '2026-07-11T06:30:00Z',
@@ -120,7 +126,8 @@ const SEED_WORKERS: Worker[] = [
     phone: '010-4567-8901',
     office_id: 'OFFICE001',
     state: 'READY',
-    trade: 'MASONRY',
+    preferred_trades: ['MASONRY', 'FORMWORK', 'REBAR'],
+    excluded_trades: [],
     skill_level: 5,
     career_years: 15,
     age: 48,
@@ -130,6 +137,7 @@ const SEED_WORKERS: Worker[] = [
     completed_count: 120,
     no_show_count: 0,
     current_crew_id: null,
+    current_offer: null,
     state_changed_at: '2026-07-11T07:30:00Z',
     created_at: '2025-11-01T09:00:00Z',
     updated_at: '2026-07-11T07:30:00Z',
@@ -140,8 +148,9 @@ const SEED_WORKERS: Worker[] = [
     name: '정대호',
     phone: '010-5678-9012',
     office_id: 'OFFICE001',
-    state: 'RUNNING',
-    trade: 'FORMWORK',
+    state: 'READY',
+    preferred_trades: ['FORMWORK', 'GENERAL'],
+    excluded_trades: ['MASONRY'],
     skill_level: 3,
     career_years: 4,
     age: 27,
@@ -150,7 +159,8 @@ const SEED_WORKERS: Worker[] = [
     certifications: ['건설기능사'],
     completed_count: 18,
     no_show_count: 2,
-    current_crew_id: 'CREW001',
+    current_crew_id: null,
+    current_offer: null,
     state_changed_at: '2026-07-12T07:00:00Z',
     created_at: '2026-04-01T09:00:00Z',
     updated_at: '2026-07-12T07:00:00Z',
@@ -162,7 +172,8 @@ const SEED_WORKERS: Worker[] = [
     phone: '010-6789-0123',
     office_id: 'OFFICE001',
     state: 'READY',
-    trade: 'MATERIAL_CARRY',
+    preferred_trades: ['MATERIAL_CARRY', 'GENERAL'],
+    excluded_trades: ['FORMWORK'],
     skill_level: 2,
     career_years: 2,
     age: 24,
@@ -172,6 +183,7 @@ const SEED_WORKERS: Worker[] = [
     completed_count: 10,
     no_show_count: 0,
     current_crew_id: null,
+    current_offer: null,
     state_changed_at: '2026-07-11T08:00:00Z',
     created_at: '2026-05-20T09:00:00Z',
     updated_at: '2026-07-11T08:00:00Z',
@@ -195,36 +207,16 @@ const SEED_REQUESTS: WorkRequest[] = [
     budget: 500000,
     priority: { cost: 'MEDIUM', skill: 'HIGH', teamwork: 'MEDIUM' },
     notes: '고층 작업 경험자 우대',
-    status: 'RUNNING',
+    status: 'REQUESTED',
     created_at: '2026-07-10T09:00:00Z',
-    updated_at: '2026-07-12T07:00:00Z',
+    updated_at: '2026-07-10T09:00:00Z',
   },
 ];
 
 export const mockState: MockState = {
   workers: [...SEED_WORKERS],
   requests: [...SEED_REQUESTS],
-  crews: [
-    {
-      crew_id: 'CREW001',
-      request_id: 'REQ001',
-      office_id: 'OFFICE001',
-      status: 'RUNNING',
-      source: 'MANUAL',
-      member_ids: ['W005'],
-      members: [
-        {
-          worker_id: 'W005',
-          name: '정대호',
-          trade: 'FORMWORK',
-          skill_level: 3,
-          desired_daily_wage: 170000,
-        },
-      ],
-      created_at: '2026-07-11T10:00:00Z',
-      updated_at: '2026-07-12T07:00:00Z',
-    },
-  ],
+  crews: [],
   gapEvents: [],
   notifications: [],
 };
