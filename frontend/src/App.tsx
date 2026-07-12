@@ -11,6 +11,9 @@ import WorkerAssignmentsPage from './pages/worker/AssignmentsPage';
 
 // Office pages
 import OfficeHomePage from './pages/office/HomePage';
+import OfficeWorkersPage from './pages/office/WorkersPage';
+import OfficeRequestDetailPage from './pages/office/RequestDetailPage';
+import OfficeComposePage from './pages/office/ComposePage';
 
 // Company pages
 import CompanyHomePage from './pages/company/HomePage';
@@ -49,6 +52,9 @@ export default function App() {
             }
           >
             <Route index element={<OfficeHomePage />} />
+            <Route path="workers" element={<OfficeWorkersPage />} />
+            <Route path="requests/:requestId" element={<OfficeRequestDetailPage />} />
+            <Route path="compose/:requestId" element={<OfficeComposePage />} />
           </Route>
 
           {/* 건설사 */}
