@@ -50,9 +50,11 @@ def test_workspace_root_on_path_is_layer_substitute():
     assert importlib.import_module("agent") is agent
 
 
-def test_backend_shared_is_not_implemented_here():
-    # 담당자 A owns backend/shared/*; 담당자 B must not create it.
-    assert not (ROOT / "backend" / "shared").exists()
+def test_backend_shared_present_after_merge():
+    # 담당자 A owns backend/shared/* and it is now merged into the workspace.
+    # 담당자 B still consumes these helpers via the tests/mocks stubs at this
+    # checkpoint, but the real package is expected to exist post-merge.
+    assert (ROOT / "backend" / "shared").is_dir()
 
 
 # --- shared stub behaviour --------------------------------------------------------
