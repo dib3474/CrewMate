@@ -214,14 +214,18 @@ export default function ApplicationPage() {
             placeholder="부산 해운대구" />
         </div>
 
-        {/* 희망 일당 — 직접 입력 + 위아래 버튼 유지 */}
+        {/* 희망 일당 — 직접 입력 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">희망 일당 (원) *</label>
-          <input type="number" min={0} step={10000} required
-            value={form.desired_daily_wage}
-            onChange={(e) => setForm({ ...form, desired_daily_wage: Number(e.target.value) })}
-            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500" />
-          <p className="text-xs text-gray-400 mt-1">{form.desired_daily_wage.toLocaleString()}원 (직접 입력 가능)</p>
+          <input type="text" inputMode="numeric" required
+            value={form.desired_daily_wage || ''}
+            onChange={(e) => {
+              const v = e.target.value.replace(/[^0-9]/g, '');
+              setForm({ ...form, desired_daily_wage: v ? Number(v) : 0 });
+            }}
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+            placeholder="180000" />
+          <p className="text-xs text-gray-400 mt-1">{form.desired_daily_wage ? form.desired_daily_wage.toLocaleString() + '원' : ''}</p>
         </div>
 
         {/* 자격증 */}

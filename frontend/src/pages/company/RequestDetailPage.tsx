@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { api } from '../../api/client';
 import { usePolling } from '../../hooks/usePolling';
-import type { WorkRequest, WorkRequestStatus, Crew, CrewMember, AcceptanceStatus } from '../../api/types';
+import type { WorkRequest, WorkRequestStatus, Crew, CrewMember, AcceptanceStatus, WorkerState } from '../../api/types';
 
 const STATUS_STEPS: WorkRequestStatus[] = ['REQUESTED', 'APPROVED', 'DISPATCHED', 'RUNNING', 'COMPLETED'];
 
@@ -25,7 +25,16 @@ const ACCEPTANCE_CONFIG: Record<AcceptanceStatus, { label: string; color: string
   DECLINED: { label: '거절', color: 'bg-red-100 text-red-700' },
 };
 
-interface RequestDetail extends WorkRequest { crew: Crew | null; }
+const WORKER_STATE_BADGE: Record<WorkerState, { label: string; color: string }> = {
+  INACTIVE: { label: '퇴근 완료', color: 'bg-gray-100 text-gray-600' },
+  READY: { label: '대기', color: 'bg-gray-100 text-gray-600' },
+  NOTIFIED: { label: '제안 중', color: 'bg-purple-100 text-purple-600' },
+  RESERVED: { label: '배차 완료', color: 'bg-blue-100 text-blue-700' },
+  RUNNING: { label: '작업 중', color: 'bg-orange-100 text-orange-700' },
+};
+
+interface CrewMemberWithState extends CrewMember { worker_state: WorkerState; }
+interface RequestDetail extends WorkRequest { crew: (Crew & { members: CrewMemberWithState[] }) | null; }
 
 export default function RequestDetailPage() {
   const { requestId } = useParams<{ requestId: string }>();
@@ -41,25 +50,28 @@ export default function RequestDetailPage() {
 
   const { data: detail, refetch } = usePolling<RequestDetail | null>({ fetchFn: fetchDetail, interval: 3000 });
 
-  const handleCheckin = async (workerId: string) => {
+  const handleCheckin = async (workerId: string, workerName: string) => {
+    if (!confirm(`${workerName}님을 출근 처리하시겠습니까?`)) return;
     setActionLoading(workerId + '_in');
-    const crewId = detail?.crew?.crew_id;
-    await api.post(`/company/crews/${crewId}/checkin/${workerId}`, { worker_id: workerId });
+    const res = await api.post(`/company/crews/${detail?.crew?.crew_id}/checkin/${workerId}`, { worker_id: workerId });
     setActionLoading(null);
+    if (!res.success) alert(res.error.message);
     refetch();
   };
 
-  const handleCheckout = async (workerId: string) => {
+  const handleCheckout = async (workerId: string, workerName: string) => {
+    if (!confirm(`${workerName}님을 퇴근 처리하시겠습니까?\n퇴근 처리 후에는 되돌릴 수 없습니다.`)) return;
     setActionLoading(workerId + '_out');
-    await api.post(`/company/crews/${detail?.crew?.crew_id}/checkout/${workerId}`, { worker_id: workerId });
+    const res = await api.post(`/company/crews/${detail?.crew?.crew_id}/checkout/${workerId}`, { worker_id: workerId });
     setActionLoading(null);
+    if (!res.success) alert(res.error.message);
     refetch();
   };
 
   if (!detail) return <p className="text-center text-gray-400 py-10">불러오는 중...</p>;
 
   const currentStepIdx = STATUS_STEPS.indexOf(detail.status);
-  const isDispatched = detail.status === 'DISPATCHED' || detail.status === 'RUNNING';
+  const showAttendance = detail.status === 'DISPATCHED' || detail.status === 'RUNNING';
 
   return (
     <div className="max-w-2xl mx-auto space-y-5">
@@ -91,7 +103,15 @@ export default function RequestDetailPage() {
       {detail.status === 'DISPATCHED' && (
         <div className="bg-green-50 border border-green-200 p-4 rounded-lg text-center">
           <p className="text-green-700 font-medium">✓ 전원 수락 완료 — 배차 확정</p>
-          <p className="text-green-600 text-sm mt-1">작업일에 출근 확인 버튼으로 출석을 처리해주세요.</p>
+          <p className="text-green-600 text-sm mt-1">출근 확인 버튼으로 출석을 처리해주세요.</p>
+        </div>
+      )}
+
+      {/* 작업 완료 배너 */}
+      {detail.status === 'COMPLETED' && (
+        <div className="bg-gray-50 border border-gray-200 p-4 rounded-lg text-center">
+          <p className="text-gray-700 font-medium">✓ 작업 완료</p>
+          <p className="text-gray-500 text-sm mt-1">모든 인원이 퇴근 처리되었습니다.</p>
         </div>
       )}
 
@@ -102,7 +122,7 @@ export default function RequestDetailPage() {
           <div><span className="text-gray-500">작업일</span><p className="font-medium text-gray-800">{detail.work_date}</p></div>
           <div><span className="text-gray-500">시작 시간</span><p className="font-medium text-gray-800">{detail.start_time}</p></div>
           <div className="col-span-2"><span className="text-gray-500">위치</span><p className="font-medium text-gray-800">{detail.location_text}</p></div>
-          <div><span className="text-gray-500">예산</span><p className="font-medium text-gray-800">{detail.budget.toLocaleString()}원</p></div>
+          <div><span className="text-gray-500">총예산</span><p className="font-medium text-gray-800">{detail.budget.toLocaleString()}원</p></div>
           <div><span className="text-gray-500">우선순위</span><p className="font-medium text-gray-800 text-xs">비용 {PRIORITY_LABEL[detail.priority.cost]} / 숙련 {PRIORITY_LABEL[detail.priority.skill]} / 팀워크 {PRIORITY_LABEL[detail.priority.teamwork]}</p></div>
         </div>
       </div>
@@ -111,37 +131,42 @@ export default function RequestDetailPage() {
       {detail.crew && detail.crew.members.length > 0 && (
         <div className="bg-white rounded-lg border border-gray-200 p-5">
           <h3 className="text-sm font-medium text-gray-500 mb-3">
-            작업조 {isDispatched && <span className="text-xs text-orange-600 ml-2">출퇴근 관리</span>}
+            작업조 {showAttendance && <span className="text-xs text-orange-600 ml-2">출퇴근 관리</span>}
           </h3>
           <div className="space-y-2">
-            {detail.crew.members.map((member: CrewMember) => {
+            {detail.crew.members.map((member: CrewMemberWithState) => {
               const accInfo = ACCEPTANCE_CONFIG[member.acceptance];
-              // 실제 worker 상태를 알려면 별도 API 필요하지만, mock에서는 acceptance 기준으로 표시
-              const isReserved = member.acceptance === 'ACCEPTED' && (detail.status === 'DISPATCHED');
-              const isRunning = detail.status === 'RUNNING';
+              const stateInfo = WORKER_STATE_BADGE[member.worker_state];
+              const canCheckin = member.worker_state === 'RESERVED' && showAttendance;
+              const canCheckout = member.worker_state === 'RUNNING' && showAttendance;
 
               return (
                 <div key={member.worker_id} className="flex items-center justify-between text-sm py-2.5 px-3 bg-orange-50 rounded">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
                     <span className="font-medium text-gray-800">{member.name}</span>
                     <span className="text-xs text-gray-500">{TRADE_LABEL[member.assigned_trade]}</span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${accInfo.color}`}>{accInfo.label}</span>
+                    {/* 수락 상태 (아직 수락 대기 중일 때) */}
+                    {member.acceptance !== 'ACCEPTED' && (
+                      <span className={`text-xs px-1.5 py-0.5 rounded-full ${accInfo.color}`}>{accInfo.label}</span>
+                    )}
+                    {/* worker 현재 상태 */}
+                    {member.acceptance === 'ACCEPTED' && (
+                      <span className={`text-xs px-1.5 py-0.5 rounded-full ${stateInfo.color}`}>{stateInfo.label}</span>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-gray-400">{member.offered_wage.toLocaleString()}원</span>
-                    {/* 출근 버튼: 배차완료(DISPATCHED) 상태에서 */}
-                    {isReserved && (
-                      <button onClick={() => handleCheckin(member.worker_id)}
+                    {canCheckin && (
+                      <button onClick={() => handleCheckin(member.worker_id, member.name)}
                         disabled={actionLoading === member.worker_id + '_in'}
-                        className="px-2 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700 disabled:opacity-50">
+                        className="px-2.5 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700 disabled:opacity-50">
                         {actionLoading === member.worker_id + '_in' ? '...' : '출근'}
                       </button>
                     )}
-                    {/* 퇴근 버튼: RUNNING 상태에서 */}
-                    {isRunning && (
-                      <button onClick={() => handleCheckout(member.worker_id)}
+                    {canCheckout && (
+                      <button onClick={() => handleCheckout(member.worker_id, member.name)}
                         disabled={actionLoading === member.worker_id + '_out'}
-                        className="px-2 py-1 bg-gray-600 text-white text-xs rounded hover:bg-gray-700 disabled:opacity-50">
+                        className="px-2.5 py-1 bg-gray-600 text-white text-xs rounded hover:bg-gray-700 disabled:opacity-50">
                         {actionLoading === member.worker_id + '_out' ? '...' : '퇴근'}
                       </button>
                     )}

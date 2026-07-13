@@ -101,6 +101,7 @@ export default function ComposePage() {
   const tradeStatus = getTradeStatus();
   const allFulfilled = tradeStatus.every((t) => t.have >= t.required);
   const totalCost = selected.reduce((s, m) => s + m.offered_wage, 0);
+  const overBudget = request ? totalCost > request.budget && request.budget > 0 : false;
 
   const handleApprove = async () => {
     if (!requestId) return;
@@ -158,7 +159,8 @@ export default function ComposePage() {
         </div>
         <div className="mt-2 text-sm text-gray-500">
           선택: {selected.length}명 / 예상 총 비용: {totalCost.toLocaleString()}원
-          {request.budget > 0 && totalCost > request.budget && <span className="text-red-600 ml-2">⚠ 예산 초과</span>}
+          {request.budget > 0 && <span className="ml-2 text-gray-400">/ 총예산: {request.budget.toLocaleString()}원</span>}
+          {overBudget && <span className="text-red-600 ml-2">⚠ 총예산 초과 — 승인 불가</span>}
         </div>
       </div>
 
@@ -188,8 +190,8 @@ export default function ComposePage() {
                       <option key={t} value={t}>{TRADE_LABEL[t]}{w.preferred_trades.includes(t) ? ' ★' : ''}</option>
                     ))}
                   </select>
-                  <input type="number" min={0} step={10000} value={s.offered_wage}
-                    onChange={(e) => updateMember(s.worker_id, 'offered_wage', e.target.value)}
+                  <input type="text" inputMode="numeric" value={s.offered_wage || ''}
+                    onChange={(e) => { const v = e.target.value.replace(/[^0-9]/g, ''); updateMember(s.worker_id, 'offered_wage', v ? Number(v) : 0); }}
                     className="w-28 border border-gray-300 rounded px-2 py-1 text-sm" />
                   <span className="text-xs text-gray-400">원</span>
                   <button onClick={() => setSelected(selected.filter((x) => x.worker_id !== s.worker_id))}
@@ -256,7 +258,7 @@ export default function ComposePage() {
       {/* 승인 버튼 */}
       <div className="flex justify-end">
         <button onClick={handleApprove}
-          disabled={!allFulfilled || approving || selected.length === 0}
+          disabled={!allFulfilled || overBudget || approving || selected.length === 0}
           className="bg-purple-600 text-white px-6 py-2.5 rounded-md text-sm font-medium hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
           {approving ? '승인 처리 중...' : `편성 승인 (${selected.length}명)`}
         </button>

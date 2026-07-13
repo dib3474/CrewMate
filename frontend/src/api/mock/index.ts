@@ -55,6 +55,7 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
       no_show_count: 0,
       current_crew_id: null,
       current_offer: null,
+      work_history: [],
       state_changed_at: new Date().toISOString(),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -211,7 +212,15 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     const request = mockState.requests.find((r) => r.request_id === requestId);
     if (!request) return { success: false, error: { code: 'REQUEST_NOT_FOUND', message: '요청을 찾을 수 없습니다.' } };
     const crew = mockState.crews.find((c) => c.request_id === request.request_id);
-    return { success: true, data: { ...request, crew: crew || null } };
+    // member에 실시간 worker_state 추가
+    const crewWithState = crew ? {
+      ...crew,
+      members: crew.members.map((m) => {
+        const w = mockState.workers.find((x) => x.worker_id === m.worker_id);
+        return { ...m, worker_state: w?.state || 'INACTIVE' };
+      }),
+    } : null;
+    return { success: true, data: { ...request, crew: crewWithState } };
   },
 
   // 출근 처리 (company가 호출)
@@ -245,7 +254,34 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     if (wIdx < 0) return { success: false, error: { code: 'WORKER_NOT_FOUND', message: '근로자를 찾을 수 없습니다.' } };
     const worker = mockState.workers[wIdx];
     if (worker.state !== 'RUNNING') return { success: false, error: { code: 'STATE_CONFLICT', message: '퇴근 처리는 작업중(RUNNING) 상태에서만 가능합니다.' } };
-    mockState.workers[wIdx] = { ...worker, state: 'INACTIVE', current_crew_id: null, current_offer: null, completed_count: worker.completed_count + 1, state_changed_at: now(), updated_at: now() };
+    const crewIdBeforeCheckout = worker.current_crew_id;
+    const crewForHistory = mockState.crews.find((c) => c.crew_id === crewIdBeforeCheckout);
+    const reqForHistory = crewForHistory ? mockState.requests.find((r) => r.request_id === crewForHistory.request_id) : null;
+    const memberForHistory = crewForHistory?.members.find((m) => m.worker_id === worker_id);
+    const historyEntry = reqForHistory && memberForHistory ? {
+      crew_id: crewIdBeforeCheckout!,
+      request_id: reqForHistory.request_id,
+      site_name: reqForHistory.site_name,
+      work_date: reqForHistory.work_date,
+      assigned_trade: memberForHistory.assigned_trade,
+      offered_wage: memberForHistory.offered_wage,
+      completed_at: now(),
+    } : null;
+    mockState.workers[wIdx] = { ...worker, state: 'INACTIVE', current_crew_id: null, current_offer: null, completed_count: worker.completed_count + 1, work_history: historyEntry ? [...worker.work_history, historyEntry] : worker.work_history, state_changed_at: now(), updated_at: now() };
+    // 전원 퇴근(INACTIVE) 시 crew→COMPLETED, request→COMPLETED
+    const crew = mockState.crews.find((c) => c.crew_id === crewIdBeforeCheckout);
+    if (crew) {
+      const allDone = crew.member_ids.every((id) => {
+        if (id === worker_id) return true; // 방금 퇴근한 worker
+        const w = mockState.workers.find((x) => x.worker_id === id);
+        return w && w.state === 'INACTIVE';
+      });
+      if (allDone) {
+        crew.status = 'COMPLETED'; crew.updated_at = now();
+        const reqIdx = mockState.requests.findIndex((r) => r.request_id === crew.request_id);
+        if (reqIdx >= 0) { mockState.requests[reqIdx].status = 'COMPLETED'; mockState.requests[reqIdx].updated_at = now(); }
+      }
+    }
     return { success: true, data: mockState.workers[wIdx] };
   },
 
@@ -265,7 +301,56 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     const request = mockState.requests.find((r) => r.request_id === requestId);
     if (!request) return { success: false, error: { code: 'REQUEST_NOT_FOUND', message: '요청을 찾을 수 없습니다.' } };
     const crew = mockState.crews.find((c) => c.request_id === request.request_id);
-    return { success: true, data: { ...request, crew: crew || null } };
+    const crewWithState = crew ? {
+      ...crew,
+      members: crew.members.map((m) => {
+        const w = mockState.workers.find((x) => x.worker_id === m.worker_id);
+        return { ...m, worker_state: w?.state || 'INACTIVE' };
+      }),
+    } : null;
+    return { success: true, data: { ...request, crew: crewWithState } };
+  },
+
+  // office가 요청 거절
+  'POST /office/requests/{requestId}/reject': async (body, requestId?: string) => {
+    await delay(200);
+    const { reason } = (body || {}) as { reason: string };
+    const reqIdx = mockState.requests.findIndex((r) => r.request_id === requestId);
+    if (reqIdx < 0) return { success: false, error: { code: 'REQUEST_NOT_FOUND', message: '요청을 찾을 수 없습니다.' } };
+    const req = mockState.requests[reqIdx];
+    if (req.status !== 'REQUESTED') return { success: false, error: { code: 'STATE_CONFLICT', message: '이미 처리된 요청입니다.' } };
+    mockState.requests[reqIdx] = { ...req, status: 'REJECTED', rejection_reason: reason, updated_at: now() };
+    pushNotification(req.company_id, 'REQUEST_REJECTED', '요청 거절', `"${req.site_name}" 요청이 거절되었습니다. 사유: ${reason}`);
+    return { success: true, data: mockState.requests[reqIdx] };
+  },
+
+  // office가 무응답 worker 제안 취소 (worker→INACTIVE)
+  'POST /office/crews/{crewId}/cancel-offer/{workerId}': async (body, _param?: string) => {
+    await delay(200);
+    const { worker_id } = (body || {}) as { worker_id: string };
+    const wIdx = mockState.workers.findIndex((w) => w.worker_id === worker_id);
+    if (wIdx < 0) return { success: false, error: { code: 'WORKER_NOT_FOUND', message: '근로자를 찾을 수 없습니다.' } };
+    const worker = mockState.workers[wIdx];
+    if (worker.state !== 'NOTIFIED') return { success: false, error: { code: 'STATE_CONFLICT', message: '제안 취소는 NOTIFIED 상태에서만 가능합니다.' } };
+    mockState.workers[wIdx] = { ...worker, state: 'INACTIVE', current_offer: null, current_crew_id: null, state_changed_at: now(), updated_at: now() };
+    // crew member → DECLINED 처리
+    const crew = mockState.crews.find((c) => c.crew_id === worker.current_crew_id || c.member_ids.includes(worker_id));
+    if (crew) {
+      const mIdx = crew.members.findIndex((m) => m.worker_id === worker_id);
+      if (mIdx >= 0) crew.members[mIdx].acceptance = 'DECLINED';
+      crew.updated_at = now();
+    }
+    pushNotification(worker.user_id, 'OFFER_CANCELLED', '제안 취소', '배정 제안이 취소되었습니다.');
+    return { success: true, data: mockState.workers[wIdx] };
+  },
+
+  // worker 작업 이력 조회
+  'GET /worker/history': async () => {
+    await delay(150);
+    const userId = getCurrentUserId();
+    const worker = mockState.workers.find((w) => w.user_id === userId);
+    if (!worker) return { success: false, error: { code: 'WORKER_NOT_FOUND', message: '근로자 정보를 찾을 수 없습니다.' } };
+    return { success: true, data: worker.work_history };
   },
 
   // 수동 편성 (새 플로우: assigned_trade + offered_wage 포함)

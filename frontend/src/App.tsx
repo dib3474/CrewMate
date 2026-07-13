@@ -8,6 +8,7 @@ import Layout from './components/Layout';
 import WorkerHomePage from './pages/worker/HomePage';
 import WorkerApplicationPage from './pages/worker/ApplicationPage';
 import WorkerAssignmentsPage from './pages/worker/AssignmentsPage';
+import WorkerHistoryPage from './pages/worker/HistoryPage';
 
 // Office pages
 import OfficeHomePage from './pages/office/HomePage';
@@ -40,6 +41,7 @@ export default function App() {
             <Route index element={<WorkerHomePage />} />
             <Route path="application" element={<WorkerApplicationPage />} />
             <Route path="assignments" element={<WorkerAssignmentsPage />} />
+            <Route path="history" element={<WorkerHistoryPage />} />
           </Route>
 
           {/* 인력사무소 */}

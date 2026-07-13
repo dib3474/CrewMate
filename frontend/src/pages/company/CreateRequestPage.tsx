@@ -205,19 +205,22 @@ export default function CreateRequestPage() {
           </div>
         </div>
 
-        {/* 예산 */}
+        {/* 총예산 */}
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">예산 (원) *</label>
+          <label className="block text-sm font-medium text-gray-700 mb-1">총예산 (원) *</label>
           <input
-            type="number"
-            min={100000}
-            step={50000}
+            type="text"
+            inputMode="numeric"
             required
-            value={form.budget}
-            onChange={(e) => setForm({ ...form, budget: Number(e.target.value) })}
+            value={form.budget || ''}
+            onChange={(e) => {
+              const v = e.target.value.replace(/[^0-9]/g, '');
+              setForm({ ...form, budget: v ? Number(v) : 0 });
+            }}
             className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+            placeholder="500000"
           />
-          <p className="text-xs text-gray-400 mt-1">{form.budget.toLocaleString()}원</p>
+          <p className="text-xs text-gray-400 mt-1">{form.budget ? form.budget.toLocaleString() + '원' : ''}</p>
         </div>
 
         {/* 우선순위 */}

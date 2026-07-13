@@ -19,6 +19,7 @@ export type WorkRequestStatus =
   | 'DISPATCHED'
   | 'RUNNING'
   | 'COMPLETED'
+  | 'REJECTED'
   | 'CANCELLED';
 
 // 작업조 상태
@@ -106,6 +107,18 @@ export interface Worker {
   state_changed_at: string;
   created_at: string;
   updated_at: string;
+  // 작업 이력
+  work_history: WorkHistoryEntry[];
+}
+
+export interface WorkHistoryEntry {
+  crew_id: string;
+  request_id: string;
+  site_name: string;
+  work_date: string;
+  assigned_trade: Trade;
+  offered_wage: number;
+  completed_at: string;
 }
 
 export interface RequiredWorker {
@@ -132,6 +145,7 @@ export interface WorkRequest {
   priority: Priority;
   notes: string;
   status: WorkRequestStatus;
+  rejection_reason?: string;
   created_at: string;
   updated_at: string;
 }
@@ -143,6 +157,7 @@ export interface CrewMember {
   skill_level: number;
   offered_wage: number;
   acceptance: AcceptanceStatus;
+  notified_at?: string;
 }
 
 export interface Recommendation {

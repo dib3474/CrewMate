@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api/client';
 import { usePolling } from '../../hooks/usePolling';
@@ -12,6 +12,7 @@ const STATUS_CONFIG: Record<WorkRequestStatus, { label: string; color: string }>
   DISPATCHED: { label: '배차 완료', color: 'bg-teal-100 text-teal-700' },
   RUNNING: { label: '작업 중', color: 'bg-orange-100 text-orange-700' },
   COMPLETED: { label: '완료', color: 'bg-green-100 text-green-700' },
+  REJECTED: { label: '거절됨', color: 'bg-red-100 text-red-600' },
   CANCELLED: { label: '취소', color: 'bg-gray-100 text-gray-500' },
 };
 
@@ -25,6 +26,7 @@ const TRADE_LABEL: Record<string, string> = {
 
 export default function CompanyHomePage() {
   const navigate = useNavigate();
+  const [tab, setTab] = useState<'active' | 'dispatched' | 'done'>('active');
 
   const fetchRequests = useCallback(async () => {
     const res = await api.get<WorkRequest[]>('/company/requests');
@@ -36,6 +38,22 @@ export default function CompanyHomePage() {
     fetchFn: fetchRequests,
     interval: 5000,
   });
+
+  const activeStatuses: WorkRequestStatus[] = ['REQUESTED', 'COMPOSING', 'PROPOSED', 'APPROVED'];
+  const dispatchedStatuses: WorkRequestStatus[] = ['DISPATCHED', 'RUNNING'];
+  const doneStatuses: WorkRequestStatus[] = ['COMPLETED', 'REJECTED', 'CANCELLED'];
+
+  const filtered = (requests || []).filter((r) => {
+    if (tab === 'active') return activeStatuses.includes(r.status);
+    if (tab === 'dispatched') return dispatchedStatuses.includes(r.status);
+    return doneStatuses.includes(r.status);
+  });
+
+  const counts = {
+    active: (requests || []).filter((r) => activeStatuses.includes(r.status)).length,
+    dispatched: (requests || []).filter((r) => dispatchedStatuses.includes(r.status)).length,
+    done: (requests || []).filter((r) => doneStatuses.includes(r.status)).length,
+  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-4">
@@ -49,27 +67,45 @@ export default function CompanyHomePage() {
         </button>
       </div>
 
+      {/* 탭 */}
+      <div className="flex border-b border-gray-200">
+        {([
+          { key: 'active' as const, label: `요청 중 (${counts.active})` },
+          { key: 'dispatched' as const, label: `배차 완료 (${counts.dispatched})` },
+          { key: 'done' as const, label: `완료 (${counts.done})` },
+        ]).map((t) => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              tab === t.key ? 'border-orange-600 text-orange-700' : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       {loading && !requests && (
         <div className="bg-white rounded-lg border border-gray-200 p-6 text-center">
           <p className="text-gray-400">불러오는 중...</p>
         </div>
       )}
 
-      {requests && requests.length === 0 && (
+      {filtered.length === 0 && !loading && (
         <div className="bg-white rounded-lg border border-gray-200 p-10 text-center">
-          <p className="text-gray-500 mb-3">등록된 인력 요청이 없습니다.</p>
-          <button
-            onClick={() => navigate('/company/requests/new')}
-            className="text-orange-600 text-sm hover:underline"
-          >
-            첫 요청을 만들어보세요 →
-          </button>
+          <p className="text-gray-500 mb-3">
+            {tab === 'active' && '진행 중인 요청이 없습니다.'}
+            {tab === 'dispatched' && '배차 완료된 요청이 없습니다.'}
+            {tab === 'done' && '완료된 요청이 없습니다.'}
+          </p>
+          {tab === 'active' && (
+            <button onClick={() => navigate('/company/requests/new')}
+              className="text-orange-600 text-sm hover:underline">첫 요청을 만들어보세요 →</button>
+          )}
         </div>
       )}
 
-      {requests && requests.length > 0 && (
+      {filtered.length > 0 && (
         <div className="space-y-3">
-          {requests.map((req) => {
+          {filtered.map((req) => {
             const statusInfo = STATUS_CONFIG[req.status];
             const totalWorkers = req.required_workers.reduce((s, w) => s + w.count, 0);
 

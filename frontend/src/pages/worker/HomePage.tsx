@@ -232,7 +232,11 @@ export default function WorkerHomePage() {
 
       {/* 실적 */}
       <div className="bg-white rounded-lg border border-gray-200 p-6">
-        <h3 className="text-sm font-medium text-gray-500 mb-3">작업 실적</h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-gray-500">작업 실적</h3>
+          <button onClick={() => navigate('/worker/history')}
+            className="text-xs text-green-600 hover:underline">이력 보기 →</button>
+        </div>
         <div className="text-center">
           <p className="text-2xl font-bold text-gray-800">{worker.completed_count}</p>
           <p className="text-xs text-gray-500">완료 작업</p>
