@@ -24,6 +24,18 @@ const NAME_LABEL: Record<UserRole, string> = {
   COMPANY: '회사명',
 };
 
+const REGION_LABEL: Record<UserRole, string> = {
+  WORKER: '거주 지역',
+  OFFICE: '활동 지역',
+  COMPANY: '소재 지역',
+};
+
+const REGION_HINT: Record<UserRole, string> = {
+  WORKER: '일하고 싶은 지역을 입력하세요.',
+  OFFICE: '근로자·건설사가 사무소를 고를 때 표시됩니다.',
+  COMPANY: '현장이 주로 위치한 지역을 입력하세요.',
+};
+
 export default function SignupPage() {
   const { signup } = useAuth();
   const navigate = useNavigate();
@@ -33,6 +45,7 @@ export default function SignupPage() {
   const [password, setPassword] = useState('');
   const [passwordConfirm, setPasswordConfirm] = useState('');
   const [name, setName] = useState('');
+  const [region, setRegion] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -48,9 +61,13 @@ export default function SignupPage() {
       setError('비밀번호는 4자 이상이어야 합니다.');
       return;
     }
+    if (!region.trim()) {
+      setError('지역을 입력해주세요.');
+      return;
+    }
 
     setLoading(true);
-    const result = await signup({ username, password, role, name });
+    const result = await signup({ username, password, role, name, region });
     setLoading(false);
 
     if (result.success && result.role) {
@@ -103,6 +120,20 @@ export default function SignupPage() {
               placeholder={role === 'WORKER' ? '홍길동' : role === 'OFFICE' ? '부산인력사무소' : '해운대건설'}
               required
             />
+          </div>
+
+          {/* 지역 (모든 역할) */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">{REGION_LABEL[role]}</label>
+            <input
+              type="text"
+              value={region}
+              onChange={(e) => setRegion(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="예: 부산 해운대구"
+              required
+            />
+            <p className="text-xs text-gray-400 mt-1">{REGION_HINT[role]}</p>
           </div>
 
           {/* 아이디 */}

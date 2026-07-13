@@ -65,13 +65,25 @@ export const SEED_ACCOUNTS: Record<string, { password: string; user: AuthUser }>
 
 // 회원가입으로 새 계정 등록 (mock — 메모리에만 저장, 새로고침 시 초기화)
 let signupSeq = 1;
-export function registerAccount(username: string, password: string, role: AuthUser['role'], name: string): { ok: boolean; error?: string; user?: AuthUser } {
+export function registerAccount(username: string, password: string, role: AuthUser['role'], name: string, region?: string): { ok: boolean; error?: string; user?: AuthUser } {
   if (SEED_ACCOUNTS[username]) {
     return { ok: false, error: '이미 사용 중인 아이디입니다.' };
   }
-  const userId = `USER_${role}_NEW_${signupSeq++}`;
-  const user: AuthUser = { userId, role, name, token: `mock-token-${username}` };
+  const seq = signupSeq++;
+  const userId = `USER_${role}_NEW_${seq}`;
+  const user: AuthUser = { userId, role, name, region, token: `mock-token-${username}` };
   SEED_ACCOUNTS[username] = { password, user };
+
+  // 인력사무소로 가입하면 사무소 목록에도 등록 → worker/company가 선택 가능
+  if (role === 'OFFICE') {
+    SEED_OFFICES.push({
+      office_id: `OFFICE_NEW_${seq}`,
+      name,
+      region: region || '지역 미설정',
+      worker_count: 0,
+      active: true,
+    });
+  }
   return { ok: true, user };
 }
 

@@ -28,14 +28,14 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     return { success: true, data: response };
   },
 
-  // 회원가입 (간단 — 아이디/비번/역할/이름만)
+  // 회원가입 (간단 — 아이디/비번/역할/이름 + 사무소는 지역)
   'POST /auth/signup': async (body) => {
     await delay(300);
-    const { username, password, role, name } = body as SignupRequest;
+    const { username, password, role, name, region } = body as SignupRequest;
     if (!username || !password || !name) {
       return { success: false, error: { code: 'INVALID_INPUT', message: '모든 항목을 입력해주세요.' } };
     }
-    const result = registerAccount(username, password, role, name);
+    const result = registerAccount(username, password, role, name, region);
     if (!result.ok) {
       return { success: false, error: { code: 'USERNAME_TAKEN', message: result.error! } };
     }

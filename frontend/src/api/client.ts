@@ -63,13 +63,50 @@ export async function apiRequest<T>(
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const response = await fetch(`${API_URL}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  // 15초 타임아웃 (무한 대기 방지)
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
 
-  return response.json() as Promise<ApiResponse<T>>;
+  try {
+    const response = await fetch(`${API_URL}${path}`, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    // JSON 파싱 시도
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch {
+      return {
+        success: false,
+        error: { code: 'INVALID_RESPONSE', message: `서버 응답을 해석할 수 없습니다. (HTTP ${response.status})` },
+      } as ApiResponse<T>;
+    }
+
+    // 백엔드가 이미 { success, ... } 봉투로 주면 그대로 반환
+    if (data && typeof data === 'object' && 'success' in data) {
+      return data as ApiResponse<T>;
+    }
+
+    // 봉투가 아니면 HTTP 상태로 성공/실패 판단
+    if (response.ok) {
+      return { success: true, data: data as T };
+    }
+    return {
+      success: false,
+      error: { code: `HTTP_${response.status}`, message: `요청 실패 (HTTP ${response.status})` },
+    } as ApiResponse<T>;
+  } catch (e) {
+    clearTimeout(timeout);
+    const message = e instanceof DOMException && e.name === 'AbortError'
+      ? '요청 시간이 초과되었습니다. 네트워크를 확인해주세요.'
+      : '서버에 연결할 수 없습니다. 네트워크 또는 서버 상태를 확인해주세요.';
+    return { success: false, error: { code: 'NETWORK_ERROR', message } } as ApiResponse<T>;
+  }
 }
 
 // 경로 패턴 매칭 + 파라미터 추출

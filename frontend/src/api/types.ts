@@ -224,6 +224,7 @@ export interface AuthUser {
   userId: string;
   role: UserRole;
   name: string;
+  region?: string;
   token: string;
 }
 
@@ -237,6 +238,7 @@ export interface SignupRequest {
   password: string;
   role: UserRole;
   name: string;
+  region?: string; // 인력사무소 가입 시 활동 지역
 }
 
 export interface LoginResponse {

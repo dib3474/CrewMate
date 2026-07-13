@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { api } from '../../api/client';
-import type { Worker, WorkerApplicationRequest, Trade } from '../../api/types';
+import type { Worker, WorkerApplicationRequest, Trade, Office } from '../../api/types';
 
 const TRADE_OPTIONS: { value: Trade; label: string }[] = [
   { value: 'FORMWORK', label: '형틀목공' },
@@ -12,19 +12,15 @@ const TRADE_OPTIONS: { value: Trade; label: string }[] = [
   { value: 'GENERAL', label: '보통인부' },
 ];
 
-const OFFICE_OPTIONS = [
-  { value: 'OFFICE001', label: '부산인력사무소' },
-  { value: 'OFFICE002', label: '김해인력사무소' },
-];
-
 export default function ApplicationPage() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [isEdit, setIsEdit] = useState(false);
+  const [offices, setOffices] = useState<Office[]>([]);
   const [form, setForm] = useState<WorkerApplicationRequest>({
     name: '',
     phone: '',
-    office_id: 'OFFICE001',
+    office_id: '',
     preferred_trades: [],
     excluded_trades: [],
     skill_level: 3,
@@ -39,6 +35,14 @@ export default function ApplicationPage() {
 
   useEffect(() => {
     (async () => {
+      // 인력사무소 목록 로드 (API 기반 → 백엔드 연결 시 실제 목록)
+      const officeRes = await api.get<Office[]>('/offices');
+      let officeList: Office[] = [];
+      if (officeRes.success) {
+        officeList = officeRes.data;
+        setOffices(officeList);
+      }
+
       const res = await api.get<Worker>('/worker/me');
       if (res.success && res.data.name) {
         const w = res.data;
@@ -56,6 +60,10 @@ export default function ApplicationPage() {
           desired_daily_wage: w.desired_daily_wage,
           certifications: w.certifications,
         });
+      } else {
+        // 신규 작성: 기본값으로 첫 활성 사무소 선택
+        const firstActive = officeList.find((o) => o.active);
+        if (firstActive) setForm((prev) => ({ ...prev, office_id: firstActive.office_id }));
       }
     })();
   }, []);
@@ -139,10 +147,15 @@ export default function ApplicationPage() {
         {/* 인력사무소 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">인력사무소 *</label>
-          <select value={form.office_id}
+          <select value={form.office_id} required
             onChange={(e) => setForm({ ...form, office_id: e.target.value })}
             className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
-            {OFFICE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            <option value="" disabled>인력사무소를 선택하세요</option>
+            {offices.map((o) => (
+              <option key={o.office_id} value={o.office_id} disabled={!o.active}>
+                {o.name} ({o.region}){o.active ? '' : ' · 준비 중'}
+              </option>
+            ))}
           </select>
         </div>
 
