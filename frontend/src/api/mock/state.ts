@@ -63,6 +63,18 @@ export const SEED_ACCOUNTS: Record<string, { password: string; user: AuthUser }>
   },
 };
 
+// 회원가입으로 새 계정 등록 (mock — 메모리에만 저장, 새로고침 시 초기화)
+let signupSeq = 1;
+export function registerAccount(username: string, password: string, role: AuthUser['role'], name: string): { ok: boolean; error?: string; user?: AuthUser } {
+  if (SEED_ACCOUNTS[username]) {
+    return { ok: false, error: '이미 사용 중인 아이디입니다.' };
+  }
+  const userId = `USER_${role}_NEW_${signupSeq++}`;
+  const user: AuthUser = { userId, role, name, token: `mock-token-${username}` };
+  SEED_ACCOUNTS[username] = { password, user };
+  return { ok: true, user };
+}
+
 // 메모리 상태
 export interface MockState {
   workers: Worker[];

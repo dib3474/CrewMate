@@ -232,6 +232,13 @@ export interface LoginRequest {
   password: string;
 }
 
+export interface SignupRequest {
+  username: string;
+  password: string;
+  role: UserRole;
+  name: string;
+}
+
 export interface LoginResponse {
   user: AuthUser;
 }

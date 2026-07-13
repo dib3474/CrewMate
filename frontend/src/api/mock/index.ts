@@ -1,6 +1,7 @@
 import type {
   ApiResponse,
   LoginRequest,
+  SignupRequest,
   LoginResponse,
   Worker,
   WorkRequest,
@@ -11,7 +12,7 @@ import type {
   Trade,
   Recommendation,
 } from '../types';
-import { SEED_ACCOUNTS, SEED_OFFICES, mockState, setCurrentUserId, getCurrentUserId } from './state';
+import { SEED_ACCOUNTS, SEED_OFFICES, mockState, setCurrentUserId, getCurrentUserId, registerAccount } from './state';
 
 export const handlers: Record<string, (body?: unknown, pathParam?: string) => Promise<ApiResponse<unknown>>> = {
   // === 인증 ===
@@ -25,6 +26,22 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     setCurrentUserId(account.user.userId);
     const response: LoginResponse = { user: account.user };
     return { success: true, data: response };
+  },
+
+  // 회원가입 (간단 — 아이디/비번/역할/이름만)
+  'POST /auth/signup': async (body) => {
+    await delay(300);
+    const { username, password, role, name } = body as SignupRequest;
+    if (!username || !password || !name) {
+      return { success: false, error: { code: 'INVALID_INPUT', message: '모든 항목을 입력해주세요.' } };
+    }
+    const result = registerAccount(username, password, role, name);
+    if (!result.ok) {
+      return { success: false, error: { code: 'USERNAME_TAKEN', message: result.error! } };
+    }
+    // 가입 즉시 로그인 처리
+    setCurrentUserId(result.user!.userId);
+    return { success: true, data: { user: result.user } };
   },
 
   // === 근로자 API ===

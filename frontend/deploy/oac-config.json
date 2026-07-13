@@ -1,0 +1,7 @@
+{
+  "Name": "crewmate-frontend-oac",
+  "Description": "OAC for CrewMate frontend S3 bucket",
+  "SigningProtocol": "sigv4",
+  "SigningBehavior": "always",
+  "OriginAccessControlOriginType": "s3"
+}

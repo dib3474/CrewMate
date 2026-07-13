@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 
 const ROLE_HOME: Record<string, string> = {
@@ -82,6 +82,11 @@ export default function LoginPage() {
             {loading ? '로그인 중...' : '로그인'}
           </button>
         </form>
+
+        <p className="text-sm text-center text-gray-500 mt-4">
+          계정이 없으신가요?{' '}
+          <Link to="/signup" className="text-blue-600 hover:underline">회원가입</Link>
+        </p>
 
         <div className="mt-6 p-3 bg-gray-50 rounded-lg">
           <p className="text-xs text-gray-500 font-medium mb-2">데모 계정</p>

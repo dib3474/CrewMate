@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider } from './auth/AuthContext';
 import LoginPage from './auth/LoginPage';
+import SignupPage from './auth/SignupPage';
 import RoleGuard from './auth/RoleGuard';
 import Layout from './components/Layout';
 
@@ -29,8 +30,9 @@ export default function App() {
       <Toaster position="top-center" toastOptions={{ duration: 3000 }} />
       <AuthProvider>
         <Routes>
-          {/* 로그인 */}
+          {/* 로그인 / 회원가입 */}
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/signup" element={<SignupPage />} />
 
           {/* 근로자 */}
           <Route

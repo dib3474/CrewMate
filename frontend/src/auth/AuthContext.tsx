@@ -1,11 +1,12 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
-import type { AuthUser, LoginRequest } from '../api/types';
+import type { AuthUser, LoginRequest, SignupRequest } from '../api/types';
 import { api, setAuthToken } from '../api/client';
 
 interface AuthContextValue {
   user: AuthUser | null;
   isAuthenticated: boolean;
   login: (credentials: LoginRequest) => Promise<{ success: boolean; error?: string; role?: string }>;
+  signup: (payload: SignupRequest) => Promise<{ success: boolean; error?: string; role?: string }>;
   logout: () => void;
   updateName: (name: string) => void;
 }
@@ -28,6 +29,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const signup = useCallback(async (payload: SignupRequest) => {
+    const res = await api.post<{ user: AuthUser }>('/auth/signup', payload);
+    if (res.success) {
+      const authUser = res.data.user;
+      setUser(authUser);
+      setAuthToken(authUser.token);
+      return { success: true, role: authUser.role };
+    } else {
+      return { success: false, error: res.error.message };
+    }
+  }, []);
+
   const logout = useCallback(() => {
     setUser(null);
     setAuthToken(null);
@@ -38,7 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, isAuthenticated: !!user, login, logout, updateName }}>
+    <AuthContext.Provider value={{ user, isAuthenticated: !!user, login, signup, logout, updateName }}>
       {children}
     </AuthContext.Provider>
   );
