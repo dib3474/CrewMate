@@ -1,13 +1,19 @@
 import { useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { api } from '../../api/client';
 import { usePolling } from '../../hooks/usePolling';
-import type { WorkRequest, WorkRequestStatus, Crew, CrewMember, AcceptanceStatus, WorkerState } from '../../api/types';
+import type { WorkRequest, WorkRequestStatus, Crew, CrewMember, AcceptanceStatus, WorkerState, GapEvent } from '../../api/types';
+
+const GAP_STEPS = ['DETECTED', 'RECOMPOSING', 'PROPOSED', 'APPROVED', 'FILLED'];
+const GAP_STEP_LABEL: Record<string, string> = {
+  DETECTED: '결원 감지', RECOMPOSING: '재편성 중', PROPOSED: '대체 추천', APPROVED: '제안 발송', FILLED: '충원 완료',
+};
 
 const STATUS_STEPS: WorkRequestStatus[] = ['REQUESTED', 'APPROVED', 'DISPATCHED', 'RUNNING', 'COMPLETED'];
 
 const STATUS_LABEL: Record<string, string> = {
-  REQUESTED: '요청됨', COMPOSING: '편성 중', PROPOSED: '추천 완료',
+  REQUESTED: '요청됨', COMPOSING: '재편성 중', PROPOSED: '추천 완료',
   APPROVED: '수락 대기', DISPATCHED: '배차 완료', RUNNING: '작업 중',
   COMPLETED: '완료', CANCELLED: '취소',
 };
@@ -34,7 +40,7 @@ const WORKER_STATE_BADGE: Record<WorkerState, { label: string; color: string }> 
 };
 
 interface CrewMemberWithState extends CrewMember { worker_state: WorkerState; }
-interface RequestDetail extends WorkRequest { crew: (Crew & { members: CrewMemberWithState[] }) | null; }
+interface RequestDetail extends WorkRequest { crew: (Crew & { members: CrewMemberWithState[] }) | null; activeGap?: GapEvent | null; }
 
 export default function RequestDetailPage() {
   const { requestId } = useParams<{ requestId: string }>();
@@ -55,7 +61,7 @@ export default function RequestDetailPage() {
     setActionLoading(workerId + '_in');
     const res = await api.post(`/company/crews/${detail?.crew?.crew_id}/checkin/${workerId}`, { worker_id: workerId });
     setActionLoading(null);
-    if (!res.success) alert(res.error.message);
+    if (!res.success) toast.error(res.error.message);
     refetch();
   };
 
@@ -64,7 +70,17 @@ export default function RequestDetailPage() {
     setActionLoading(workerId + '_out');
     const res = await api.post(`/company/crews/${detail?.crew?.crew_id}/checkout/${workerId}`, { worker_id: workerId });
     setActionLoading(null);
-    if (!res.success) alert(res.error.message);
+    if (!res.success) toast.error(res.error.message);
+    refetch();
+  };
+
+  const handleGapEvent = async (workerId: string, workerName: string, type: 'NO_SHOW' | 'LEFT_SITE') => {
+    const label = type === 'NO_SHOW' ? '노쇼' : '작업 중 이탈';
+    if (!confirm(`${workerName}님을 ${label} 처리하시겠습니까?\n긴급 재편성이 필요해집니다.`)) return;
+    setActionLoading(workerId + '_gap');
+    const res = await api.post(`/company/crews/${detail?.crew?.crew_id}/gap-events`, { type, affected_worker_id: workerId });
+    setActionLoading(null);
+    if (!res.success) toast.error(res.error.message);
     refetch();
   };
 
@@ -115,6 +131,31 @@ export default function RequestDetailPage() {
         </div>
       )}
 
+      {/* 긴급 재편성 진행 상태 (노쇼 발생 시) */}
+      {detail.activeGap && detail.activeGap.status !== 'FAILED' && (
+        <div className={`bg-white rounded-lg border-2 p-5 ${detail.activeGap.status === 'FILLED' ? 'border-green-200' : 'border-red-200'}`}>
+          <h3 className={`text-sm font-medium mb-3 ${detail.activeGap.status === 'FILLED' ? 'text-green-700' : 'text-red-700'}`}>
+            {detail.activeGap.status === 'FILLED' ? '✓ 긴급 충원 완료' : '🚨 결원 발생 — 긴급 재편성 진행 중'}
+            <span className="text-gray-500 font-normal"> ({detail.activeGap.affected_worker_name}님 {detail.activeGap.type})</span>
+          </h3>
+          <div className="flex items-center gap-1">
+            {GAP_STEPS.map((step) => {
+              const curIdx = GAP_STEPS.indexOf(detail.activeGap!.status);
+              const stepIdx = GAP_STEPS.indexOf(step);
+              const isActive = stepIdx <= curIdx;
+              const isCurrent = stepIdx === curIdx;
+              const barColor = detail.activeGap!.status === 'FILLED' ? 'bg-green-500' : 'bg-red-500';
+              return (
+                <div key={step} className="flex-1 flex flex-col items-center">
+                  <div className={`w-full h-2 rounded-full ${isActive ? barColor : 'bg-gray-200'} ${isCurrent && detail.activeGap!.status !== 'FILLED' ? 'animate-pulse' : ''}`} />
+                  <span className={`text-[10px] mt-1 ${isActive ? 'text-gray-700 font-medium' : 'text-gray-400'}`}>{GAP_STEP_LABEL[step]}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* 요청 정보 */}
       <div className="bg-white rounded-lg border border-gray-200 p-5">
         <h3 className="text-sm font-medium text-gray-500 mb-3">요청 정보</h3>
@@ -141,8 +182,11 @@ export default function RequestDetailPage() {
               const canCheckout = member.worker_state === 'RUNNING' && showAttendance;
 
               return (
-                <div key={member.worker_id} className="flex items-center justify-between text-sm py-2.5 px-3 bg-orange-50 rounded">
+                <div key={member.worker_id} className={`flex items-center justify-between text-sm py-2.5 px-3 rounded ${member.is_replacement ? 'bg-green-50 ring-1 ring-green-300' : 'bg-orange-50'}`}>
                   <div className="flex items-center gap-2">
+                    {member.is_replacement && (
+                      <span className="text-xs bg-green-600 text-white px-1.5 py-0.5 rounded-full">신규 투입</span>
+                    )}
                     <span className="font-medium text-gray-800">{member.name}</span>
                     <span className="text-xs text-gray-500">{TRADE_LABEL[member.assigned_trade]}</span>
                     {/* 수락 상태 (아직 수락 대기 중일 때) */}
@@ -152,6 +196,10 @@ export default function RequestDetailPage() {
                     {/* worker 현재 상태 */}
                     {member.acceptance === 'ACCEPTED' && (
                       <span className={`text-xs px-1.5 py-0.5 rounded-full ${stateInfo.color}`}>{stateInfo.label}</span>
+                    )}
+                    {/* 긴급 대체 인력 예상 도착시간 */}
+                    {member.eta && member.worker_state === 'RESERVED' && (
+                      <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">🕒 도착 {member.eta}</span>
                     )}
                   </div>
                   <div className="flex items-center gap-2">
@@ -168,6 +216,22 @@ export default function RequestDetailPage() {
                         disabled={actionLoading === member.worker_id + '_out'}
                         className="px-2.5 py-1 bg-gray-600 text-white text-xs rounded hover:bg-gray-700 disabled:opacity-50">
                         {actionLoading === member.worker_id + '_out' ? '...' : '퇴근'}
+                      </button>
+                    )}
+                    {/* 배차완료(출근 전) → 노쇼 */}
+                    {canCheckin && (
+                      <button onClick={() => handleGapEvent(member.worker_id, member.name, 'NO_SHOW')}
+                        disabled={actionLoading === member.worker_id + '_gap'}
+                        className="px-2.5 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700 disabled:opacity-50">
+                        {actionLoading === member.worker_id + '_gap' ? '...' : '노쇼'}
+                      </button>
+                    )}
+                    {/* 작업 중 → 이탈 */}
+                    {canCheckout && (
+                      <button onClick={() => handleGapEvent(member.worker_id, member.name, 'LEFT_SITE')}
+                        disabled={actionLoading === member.worker_id + '_gap'}
+                        className="px-2.5 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700 disabled:opacity-50">
+                        {actionLoading === member.worker_id + '_gap' ? '...' : '이탈'}
                       </button>
                     )}
                   </div>

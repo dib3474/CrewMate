@@ -75,6 +75,14 @@ export type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
 
 // === 엔터티 ===
 
+export interface Office {
+  office_id: string;
+  name: string;
+  region: string;
+  worker_count: number;
+  active: boolean; // 현재 요청 접수 가능 여부
+}
+
 export interface Worker {
   worker_id: string;
   user_id: string;
@@ -103,6 +111,7 @@ export interface Worker {
     work_date: string;
     start_time: string;
     location_text: string;
+    is_emergency?: boolean; // 긴급 배차 제안 여부 (수락 시 예상 도착시간 선택)
   } | null;
   state_changed_at: string;
   created_at: string;
@@ -146,6 +155,7 @@ export interface WorkRequest {
   notes: string;
   status: WorkRequestStatus;
   rejection_reason?: string;
+  declined_worker_ids?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -158,6 +168,8 @@ export interface CrewMember {
   offered_wage: number;
   acceptance: AcceptanceStatus;
   notified_at?: string;
+  is_replacement?: boolean; // 긴급 재편성/빈자리 채우기로 신규 투입된 인원
+  eta?: string; // 긴급 배차 대체 인력의 예상 도착시간
 }
 
 export interface Recommendation {
@@ -189,7 +201,9 @@ export interface GapEvent {
   office_id: string;
   type: GapEventType;
   affected_worker_id: string;
+  affected_worker_name?: string;
   status: GapEventStatus;
+  recommendations?: Recommendation[];
   created_at: string;
   updated_at: string;
 }

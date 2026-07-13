@@ -5,7 +5,7 @@ import { api, setAuthToken } from '../api/client';
 interface AuthContextValue {
   user: AuthUser | null;
   isAuthenticated: boolean;
-  login: (credentials: LoginRequest) => Promise<{ success: boolean; error?: string }>;
+  login: (credentials: LoginRequest) => Promise<{ success: boolean; error?: string; role?: string }>;
   logout: () => void;
   updateName: (name: string) => void;
 }
@@ -22,7 +22,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const authUser = res.data.user;
       setUser(authUser);
       setAuthToken(authUser.token);
-      return { success: true };
+      return { success: true, role: authUser.role };
     } else {
       return { success: false, error: res.error.message };
     }

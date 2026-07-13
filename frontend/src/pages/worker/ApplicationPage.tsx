@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { api } from '../../api/client';
 import type { Worker, WorkerApplicationRequest, Trade } from '../../api/types';
 
@@ -62,7 +63,7 @@ export default function ApplicationPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (form.preferred_trades.length === 0) {
-      alert('희망 직종을 최소 1개 이상 선택해주세요.');
+      toast.error('희망 직종을 최소 1개 이상 선택해주세요.');
       return;
     }
     setLoading(true);
@@ -70,7 +71,7 @@ export default function ApplicationPage() {
     const res = await method<Worker>('/worker/application', form);
     setLoading(false);
     if (res.success) navigate('/worker');
-    else alert(res.error.message);
+    else toast.error(res.error.message);
   };
 
   const togglePreferred = (trade: Trade) => {

@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { api } from '../../api/client';
 import { usePolling } from '../../hooks/usePolling';
 import { useAuth } from '../../auth/AuthContext';
@@ -25,6 +26,7 @@ export default function WorkerHomePage() {
   const navigate = useNavigate();
   const { updateName } = useAuth();
   const [actionLoading, setActionLoading] = useState(false);
+  const [selectedEta, setSelectedEta] = useState('30분 이내');
 
   const fetchWorker = useCallback(async () => {
     const res = await api.get<Worker>('/worker/me');
@@ -46,7 +48,7 @@ export default function WorkerHomePage() {
     const res = await api.post('/worker/state/ready');
     setActionLoading(false);
     if (res.success) refetch();
-    else if (!res.success) alert(res.error.message);
+    else if (!res.success) toast.error(res.error.message);
   };
 
   const handleInactive = async () => {
@@ -54,15 +56,15 @@ export default function WorkerHomePage() {
     const res = await api.post('/worker/state/inactive');
     setActionLoading(false);
     if (res.success) refetch();
-    else if (!res.success) alert(res.error.message);
+    else if (!res.success) toast.error(res.error.message);
   };
 
-  const handleAccept = async () => {
+  const handleAccept = async (eta?: string) => {
     setActionLoading(true);
-    const res = await api.post('/worker/offer/accept');
+    const res = await api.post('/worker/offer/accept', eta ? { eta } : undefined);
     setActionLoading(false);
     if (res.success) refetch();
-    else if (!res.success) alert(res.error.message);
+    else if (!res.success) toast.error(res.error.message);
   };
 
   const handleDecline = async () => {
@@ -71,7 +73,7 @@ export default function WorkerHomePage() {
     const res = await api.post('/worker/offer/decline');
     setActionLoading(false);
     if (res.success) refetch();
-    else if (!res.success) alert(res.error.message);
+    else if (!res.success) toast.error(res.error.message);
   };
 
   if (!worker) {
@@ -139,7 +141,9 @@ export default function WorkerHomePage() {
       {/* NOTIFIED: 배정 제안 카드 */}
       {worker.state === 'NOTIFIED' && worker.current_offer && (
         <div className="bg-purple-50 rounded-lg border-2 border-purple-300 p-6">
-          <h3 className="text-sm font-medium text-purple-700 mb-3">📋 배정 제안</h3>
+          <h3 className="text-sm font-medium text-purple-700 mb-3">
+            {worker.current_offer.is_emergency ? '🚨 긴급 배정 제안' : '📋 배정 제안'}
+          </h3>
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div>
@@ -171,8 +175,22 @@ export default function WorkerHomePage() {
               </p>
             </div>
 
+            {/* 긴급 배차: 예상 도착시간 선택 */}
+            {worker.current_offer.is_emergency && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <p className="text-sm font-medium text-red-700 mb-2">🚨 긴급 배차 — 예상 도착시간을 선택해주세요</p>
+                <select value={selectedEta} onChange={(e) => setSelectedEta(e.target.value)}
+                  className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-red-400">
+                  <option value="30분 이내">30분 이내</option>
+                  <option value="1시간 이내">1시간 이내</option>
+                  <option value="1시간 30분 이내">1시간 30분 이내</option>
+                  <option value="2시간 이내">2시간 이내</option>
+                </select>
+              </div>
+            )}
+
             <div className="flex gap-3 pt-2">
-              <button onClick={handleAccept} disabled={actionLoading}
+              <button onClick={() => handleAccept(worker.current_offer?.is_emergency ? selectedEta : undefined)} disabled={actionLoading}
                 className="flex-1 bg-purple-600 text-white py-2.5 rounded-md text-sm font-medium hover:bg-purple-700 disabled:opacity-50 transition-colors">
                 {actionLoading ? '처리 중...' : '수락'}
               </button>

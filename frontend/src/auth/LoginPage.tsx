@@ -24,16 +24,8 @@ export default function LoginPage() {
 
     const result = await login({ username, password });
 
-    if (result.success) {
-      // login 성공 후 user가 갱신되므로 role에 맞는 홈으로 이동
-      // AuthContext에서 user를 가져올 수 없으므로 mock 계정 기반으로 라우팅
-      const roleMap: Record<string, string> = {
-        worker1: 'WORKER',
-        office1: 'OFFICE',
-        company1: 'COMPANY',
-      };
-      const role = roleMap[username] || 'WORKER';
-      navigate(ROLE_HOME[role], { replace: true });
+    if (result.success && result.role) {
+      navigate(ROLE_HOME[result.role], { replace: true });
     } else {
       setError(result.error || '로그인에 실패했습니다.');
     }
@@ -94,7 +86,7 @@ export default function LoginPage() {
         <div className="mt-6 p-3 bg-gray-50 rounded-lg">
           <p className="text-xs text-gray-500 font-medium mb-2">데모 계정</p>
           <div className="text-xs text-gray-600 space-y-1">
-            <p><span className="font-mono">worker1</span> — 근로자</p>
+            <p><span className="font-mono">worker1 / worker2 / worker3</span> — 근로자</p>
             <p><span className="font-mono">office1</span> — 인력사무소</p>
             <p><span className="font-mono">company1</span> — 건설사</p>
             <p className="text-gray-400 mt-1">비밀번호: demo1234</p>

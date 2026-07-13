@@ -5,8 +5,14 @@ import type {
   Crew,
   GapEvent,
   Notification,
-  Trade,
+  Office,
 } from '../types';
+
+// 시드 인력사무소 목록 (GET /offices 로 제공)
+export const SEED_OFFICES: Office[] = [
+  { office_id: 'OFFICE001', name: '부산인력사무소', region: '부산 해운대구', worker_count: 6, active: true },
+  { office_id: 'OFFICE002', name: '김해인력사무소', region: '경남 김해시', worker_count: 0, active: false },
+];
 
 // 시드 데모 계정 3종
 export const SEED_ACCOUNTS: Record<string, { password: string; user: AuthUser }> = {
@@ -17,6 +23,24 @@ export const SEED_ACCOUNTS: Record<string, { password: string; user: AuthUser }>
       role: 'WORKER',
       name: '김건우',
       token: 'mock-token-worker1',
+    },
+  },
+  worker2: {
+    password: 'demo1234',
+    user: {
+      userId: 'USER_WORKER_002',
+      role: 'WORKER',
+      name: '박철수',
+      token: 'mock-token-worker2',
+    },
+  },
+  worker3: {
+    password: 'demo1234',
+    user: {
+      userId: 'USER_WORKER_003',
+      role: 'WORKER',
+      name: '이영희',
+      token: 'mock-token-worker3',
     },
   },
   office1: {
@@ -196,28 +220,8 @@ const SEED_WORKERS: Worker[] = [
   },
 ];
 
-// 시드 요청 데이터
-const SEED_REQUESTS: WorkRequest[] = [
-  {
-    request_id: 'REQ001',
-    company_id: 'USER_COMPANY_001',
-    office_id: 'OFFICE001',
-    site_name: '해운대 A현장',
-    work_date: '2026-07-14',
-    start_time: '07:00',
-    location_text: '부산 해운대구 우동 123-4',
-    required_workers: [
-      { trade: 'FORMWORK' as Trade, count: 2 },
-      { trade: 'GENERAL' as Trade, count: 1 },
-    ],
-    budget: 500000,
-    priority: { cost: 'MEDIUM', skill: 'HIGH', teamwork: 'MEDIUM' },
-    notes: '고층 작업 경험자 우대',
-    status: 'REQUESTED',
-    created_at: '2026-07-10T09:00:00Z',
-    updated_at: '2026-07-10T09:00:00Z',
-  },
-];
+// 시드 요청 데이터 (없음 - 건설사가 직접 생성)
+const SEED_REQUESTS: WorkRequest[] = [];
 
 export const mockState: MockState = {
   workers: [...SEED_WORKERS],

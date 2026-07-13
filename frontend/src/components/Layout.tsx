@@ -1,5 +1,7 @@
 import { Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
+import { useNotificationToasts } from '../hooks/useNotificationToasts';
+import NotificationBell from './NotificationBell';
 
 const ROLE_LABEL: Record<string, string> = {
   WORKER: '근로자',
@@ -16,6 +18,9 @@ const ROLE_COLOR: Record<string, string> = {
 export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+
+  // 로그인 상태에서 새 알림을 toast로 표시
+  useNotificationToasts(!!user);
 
   const handleLogout = () => {
     logout();
@@ -35,6 +40,7 @@ export default function Layout() {
           </span>
         </div>
         <div className="flex items-center gap-4">
+          <NotificationBell />
           <span className="text-sm text-gray-600">{user.name}</span>
           <button
             onClick={handleLogout}

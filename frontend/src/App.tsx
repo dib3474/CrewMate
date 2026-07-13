@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { Toaster } from 'react-hot-toast';
 import { AuthProvider } from './auth/AuthContext';
 import LoginPage from './auth/LoginPage';
 import RoleGuard from './auth/RoleGuard';
@@ -15,6 +16,7 @@ import OfficeHomePage from './pages/office/HomePage';
 import OfficeWorkersPage from './pages/office/WorkersPage';
 import OfficeRequestDetailPage from './pages/office/RequestDetailPage';
 import OfficeComposePage from './pages/office/ComposePage';
+import OfficeEmergencyPage from './pages/office/EmergencyPage';
 
 // Company pages
 import CompanyHomePage from './pages/company/HomePage';
@@ -24,6 +26,7 @@ import CompanyRequestDetailPage from './pages/company/RequestDetailPage';
 export default function App() {
   return (
     <BrowserRouter>
+      <Toaster position="top-center" toastOptions={{ duration: 3000 }} />
       <AuthProvider>
         <Routes>
           {/* 로그인 */}
@@ -57,6 +60,7 @@ export default function App() {
             <Route path="workers" element={<OfficeWorkersPage />} />
             <Route path="requests/:requestId" element={<OfficeRequestDetailPage />} />
             <Route path="compose/:requestId" element={<OfficeComposePage />} />
+            <Route path="emergency/:eventId" element={<OfficeEmergencyPage />} />
           </Route>
 
           {/* 건설사 */}

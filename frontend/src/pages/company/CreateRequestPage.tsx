@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { api } from '../../api/client';
-import type { CreateWorkRequestPayload, Trade, PriorityLevel, RequiredWorker, WorkRequest } from '../../api/types';
+import type { CreateWorkRequestPayload, Trade, PriorityLevel, RequiredWorker, WorkRequest, Office } from '../../api/types';
 
 const TRADE_OPTIONS: { value: Trade; label: string }[] = [
   { value: 'FORMWORK', label: '형틀목공' },
@@ -20,6 +21,20 @@ const PRIORITY_OPTIONS: { value: PriorityLevel; label: string }[] = [
 export default function CreateRequestPage() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
+  const [offices, setOffices] = useState<Office[]>([]);
+  const [officeId, setOfficeId] = useState('');
+
+  // 인력사무소 목록 로드 (API 기반 → 백엔드 연결 시 자동으로 실제 목록)
+  useEffect(() => {
+    (async () => {
+      const res = await api.get<Office[]>('/offices');
+      if (res.success) {
+        setOffices(res.data);
+        const firstActive = res.data.find((o) => o.active);
+        if (firstActive) setOfficeId(firstActive.office_id);
+      }
+    })();
+  }, []);
 
   const [form, setForm] = useState({
     site_name: '',
@@ -58,15 +73,20 @@ export default function CreateRequestPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    if (!officeId) {
+      toast.error('인력사무소를 선택해주세요.');
+      return;
+    }
+
     if (requiredWorkers.length === 0) {
-      alert('필요 인원을 최소 1개 이상 추가해주세요.');
+      toast.error('필요 인원을 최소 1개 이상 추가해주세요.');
       return;
     }
 
     setLoading(true);
 
     const payload: CreateWorkRequestPayload = {
-      office_id: 'OFFICE001',
+      office_id: officeId,
       site_name: form.site_name,
       work_date: form.work_date,
       start_time: form.start_time,
@@ -87,7 +107,7 @@ export default function CreateRequestPage() {
     if (res.success) {
       navigate('/company');
     } else {
-      alert(res.error.message);
+      toast.error(res.error.message);
     }
   };
 
@@ -106,6 +126,23 @@ export default function CreateRequestPage() {
       </div>
 
       <form onSubmit={handleSubmit} className="bg-white rounded-lg border border-gray-200 p-6 space-y-5">
+        {/* 인력사무소 선택 */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">인력사무소 *</label>
+          <select
+            value={officeId}
+            onChange={(e) => setOfficeId(e.target.value)}
+            className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+          >
+            {offices.map((o) => (
+              <option key={o.office_id} value={o.office_id} disabled={!o.active}>
+                {o.name} ({o.region}){o.active ? ` · 근로자 ${o.worker_count}명` : ' · 준비 중'}
+              </option>
+            ))}
+          </select>
+          <p className="text-xs text-gray-400 mt-1">요청을 접수할 인력사무소를 선택하세요.</p>
+        </div>
+
         {/* 현장명 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">현장명 *</label>
