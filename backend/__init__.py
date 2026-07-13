@@ -1,9 +1,6 @@
-"""CrewMate backend namespace.
+"""CrewMate 백엔드 루트 패키지 (담당자 A).
 
-담당자 B owns only ``backend/functions/agent_invoke`` and
-``backend/functions/gap_event``.
-
-``backend/shared/*`` (db / auth / state / response) is owned by 담당자 A and is
-intentionally NOT implemented in this scope. Tests substitute it with the doubles in
-``tests/mocks/shared_stubs.py``.
+Lambda CodeUri 는 이 디렉터리(backend/)를 루트로 패키징하며,
+각 함수는 functions.<name>.app.lambda_handler 로 진입한다.
+공용 모듈은 shared 패키지로 import 한다 (예: from shared import responses).
 """

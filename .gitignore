@@ -19,5 +19,15 @@ htmlcov/
 venv/
 env/
 
-# OS
+# AWS SAM
+.aws-sam/
+samconfig.toml
+packaged.yaml
+
+# 환경/시크릿
+.env
+*.local
+
+# OS/IDE
 .DS_Store
+Thumbs.db
