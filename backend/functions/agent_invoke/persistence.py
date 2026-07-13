@@ -31,7 +31,7 @@ shared helper consumption (design.md → "소비하는 shared 계약")
 ------------------------------------------------------------
 ``backend/shared/*`` is 담당자 A's and is **consumed, never implemented**. It does
 not exist on disk in this scope (see ``tests/test_scaffolding.py``); tests install
-in-memory stubs under ``backend.shared.*`` via ``install_shared_stubs(monkeypatch)``.
+in-memory stubs under ``shared.*`` via ``install_shared_stubs(monkeypatch)``.
 The ``db`` module is therefore imported **lazily inside each function** so it resolves
 at call time (the real Layer module in deployment, the installed stub during tests)
 regardless of import order.
@@ -55,7 +55,7 @@ __all__ = [
 ]
 
 # --------------------------------------------------------------------------- #
-# Contract constants — mirror backend.shared.state values                      #
+# Contract constants — mirror shared.state values                      #
 # (CrewStatus.PROPOSED / Source.AGENT / RequestStatus.COMPOSING|PROPOSED).      #
 # Declared locally so this module stays importable standalone (the real        #
 # state module is 담당자 A's and absent on disk here). Values are fixed by the  #
@@ -161,7 +161,7 @@ def save_normal_proposal(recommendation: Recommendation, ctx: SaveContext) -> st
     Returns the ``crew_id`` (assigned by the db helper when ``ctx.crew_id`` is unset).
     Performs no worker state change, approval, or assignment (delegated to 담당자 A).
     """
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
+    from functions.agent_invoke import shared_gateway as db  # high-level adapter
 
     crew_id = _save_crew_via_adapter(db, recommendation, ctx)
     db.transition_request_status(ctx.request_id, _REQ_COMPOSING, _REQ_PROPOSED)

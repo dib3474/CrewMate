@@ -38,7 +38,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from agent.schemas import FixedMember
-from backend.functions.gap_event.gap_logic import Member, compute_fixed_members
+from functions.gap_event.gap_logic import Member, compute_fixed_members
 from tests.strategies import trade_names, wages, worker_ids
 
 # Feature: crew-composition-agent, Property 11: 결원 계산 fixed_members

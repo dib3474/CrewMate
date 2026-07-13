@@ -9,7 +9,7 @@ Property (design.md -> "Correctness Properties" -> Property 12):
 
 Function under test
 -------------------
-``backend.functions.gap_event.gap_logic.compute_missing(required_workers, fixed_members)``
+``functions.gap_event.gap_logic.compute_missing(required_workers, fixed_members)``
 returns, per required trade, the shortage ``max(0, required - fixed_cover)`` where
 ``fixed_cover`` is the count of retained fixed members of that trade. Repeated trade
 entries in ``required_workers`` are aggregated by summing their counts first.
@@ -60,7 +60,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from agent.schemas import FixedMember, TradeRequirement
-from backend.functions.gap_event.gap_logic import compute_missing
+from functions.gap_event.gap_logic import compute_missing
 from tests.strategies import TRADE_NAMES, trade_names, wages
 
 # Feature: crew-composition-agent, Property 12: 결원 계산 부족분·커버

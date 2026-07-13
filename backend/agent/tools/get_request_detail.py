@@ -21,7 +21,7 @@ def _read_request_detail(request_id: str, *, db: Any = None) -> Any:
     """Core read logic: return the work request detail for ``request_id``.
 
     Read-only. Calls only ``db.get_work_request`` (Requirement 5.2). ``db`` may be
-    dependency-injected for tests; otherwise 담당자 A's ``backend.shared.db`` is
+    dependency-injected for tests; otherwise 담당자 A's ``shared.db`` is
     resolved lazily.
     """
     return resolve_db(db).get_work_request(request_id)

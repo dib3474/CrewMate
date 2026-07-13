@@ -11,7 +11,7 @@ queries) plus ``backend/shared/schemas`` item builders and ``backend/shared/stat
 This module is the thin ADAPTER that maps the high-level contract my code already calls
 onto 담당자 A's real low-level API. My call sites import it as::
 
-    from backend.functions.agent_invoke import shared_gateway as db
+    from functions.agent_invoke import shared_gateway as db
 
 so the existing ``db.xxx(...)`` calls keep working unchanged, but now run against the real
 single-table backend (and, in tests, against the in-memory ``FakeSharedDB`` — the tests
@@ -52,9 +52,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from botocore.exceptions import ClientError
 
-from backend.shared import db as _db
-from backend.shared import schemas as _schemas
-from backend.shared.state import CrewStatus, GapStatus, WorkerState
+from shared import db as _db
+from shared import schemas as _schemas
+from shared.state import CrewStatus, GapStatus, WorkerState
 
 __all__ = [
     "get_work_request",

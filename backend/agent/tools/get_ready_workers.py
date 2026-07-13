@@ -28,7 +28,7 @@ def _read_ready_workers(
     (Requirement 5.3), which restricts results to workers whose ``office_id``
     matches and whose ``state`` is READY. When ``required_trades`` is provided the
     helper further narrows to those trades. ``db`` may be dependency-injected for
-    tests; otherwise 담당자 A's ``backend.shared.db`` is resolved lazily.
+    tests; otherwise 담당자 A's ``shared.db`` is resolved lazily.
     """
     trades: Optional[List[str]] = (
         list(required_trades) if required_trades is not None else None

@@ -44,7 +44,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from backend.functions.agent_invoke.validator import CHECK_NEW_READY, validate_output
+from functions.agent_invoke.validator import CHECK_NEW_READY, validate_output
 from tests.strategies import valid_scenarios
 
 # Feature: crew-composition-agent, Property 2: 신규 멤버는 READY 상태

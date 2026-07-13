@@ -17,9 +17,9 @@ Two consumption styles are supported so later tasks can pick either without rewo
   1. Dependency injection - pass ``FakeSharedDB`` / ``StubAuth`` / ``state`` / ``response``
      (or a whole :class:`SharedStubs`) into the code under test.
   2. Module substitution - :func:`install_shared_stubs` registers the stubs under
-     ``backend.shared.*`` in ``sys.modules`` via pytest's ``monkeypatch``.
+     ``shared.*`` in ``sys.modules`` via pytest's ``monkeypatch``.
 
-Nothing in this module creates or imports ``backend.shared`` on disk.
+Nothing in this module creates or imports ``shared`` on disk.
 """
 from __future__ import annotations
 
@@ -521,51 +521,51 @@ _DB_CONTRACT_METHODS = (
 
 
 def install_shared_stubs(monkeypatch, stubs: Optional[SharedStubs] = None) -> SharedStubs:
-    """Register the stubs under ``backend.shared.*`` in ``sys.modules``.
+    """Register the stubs under ``shared.*`` in ``sys.modules``.
 
     Optional convenience for later handler tests that import shared helpers with
-    ``from backend.shared import db, auth, state, response``. Uses pytest's
+    ``from shared import db, auth, state, response``. Uses pytest's
     ``monkeypatch`` so the substituted modules are removed automatically at teardown.
     담당자 A's real package is never created on disk by this helper.
 
     The db module exposes the contract functions bound to a single :class:`FakeSharedDB`
-    instance, also reachable as ``backend.shared.db.instance`` for seeding / assertions.
+    instance, also reachable as ``shared.db.instance`` for seeding / assertions.
     """
     stubs = stubs or build_shared_stubs()
 
-    shared_pkg = ModuleType("backend.shared")
+    shared_pkg = ModuleType("shared")
     shared_pkg.__path__ = []  # mark as a (namespace-less) package
 
-    db_mod = ModuleType("backend.shared.db")
+    db_mod = ModuleType("shared.db")
     for name in _DB_CONTRACT_METHODS:
         setattr(db_mod, name, getattr(stubs.db, name))
     db_mod.instance = stubs.db  # type: ignore[attr-defined]
 
-    auth_mod = ModuleType("backend.shared.auth")
+    auth_mod = ModuleType("shared.auth")
     auth_mod.require_role = stubs.auth.require_role  # type: ignore[attr-defined]
     auth_mod.ForbiddenError = ForbiddenError  # type: ignore[attr-defined]
     auth_mod.instance = stubs.auth  # type: ignore[attr-defined]
 
-    state_mod = ModuleType("backend.shared.state")
+    state_mod = ModuleType("shared.state")
     for name in vars(stubs.state):
         setattr(state_mod, name, getattr(stubs.state, name))
 
-    response_mod = ModuleType("backend.shared.response")
+    response_mod = ModuleType("shared.response")
     response_mod.ok = stubs.response.ok  # type: ignore[attr-defined]
     response_mod.error = stubs.response.error  # type: ignore[attr-defined]
 
-    # Attach submodules as attributes so ``from backend.shared import db`` works
+    # Attach submodules as attributes so ``from shared import db`` works
     # by direct attribute lookup, in addition to the sys.modules registration.
     shared_pkg.db = db_mod  # type: ignore[attr-defined]
     shared_pkg.auth = auth_mod  # type: ignore[attr-defined]
     shared_pkg.state = state_mod  # type: ignore[attr-defined]
     shared_pkg.response = response_mod  # type: ignore[attr-defined]
 
-    monkeypatch.setitem(sys.modules, "backend.shared", shared_pkg)
-    monkeypatch.setitem(sys.modules, "backend.shared.db", db_mod)
-    monkeypatch.setitem(sys.modules, "backend.shared.auth", auth_mod)
-    monkeypatch.setitem(sys.modules, "backend.shared.state", state_mod)
-    monkeypatch.setitem(sys.modules, "backend.shared.response", response_mod)
+    monkeypatch.setitem(sys.modules, "shared", shared_pkg)
+    monkeypatch.setitem(sys.modules, "shared.db", db_mod)
+    monkeypatch.setitem(sys.modules, "shared.auth", auth_mod)
+    monkeypatch.setitem(sys.modules, "shared.state", state_mod)
+    monkeypatch.setitem(sys.modules, "shared.response", response_mod)
     return stubs
 
 
@@ -573,12 +573,12 @@ def install_fake_db(monkeypatch, fake: Optional[FakeSharedDB] = None) -> FakeSha
     """Redirect 담당자 B's high-level DB contract onto an in-memory :class:`FakeSharedDB`.
 
     담당자 B's code now consumes the real ``backend/shared/*`` low-level API through the
-    ADAPTER ``backend.functions.agent_invoke.shared_gateway`` (imported at call sites as
+    ADAPTER ``functions.agent_invoke.shared_gateway`` (imported at call sites as
     ``db``). This helper monkeypatches the adapter's ten high-level module-level functions
     (``get_work_request`` … ``transition_gap_event_status``) onto ``fake``'s methods, so the
     handler / flow / assembler / gap tests exercise 담당자 B's real logic against the
     in-memory fake with the SAME high-level contract — WITHOUT shadowing the real
-    ``backend.shared`` package (so ``backend.shared.auth`` / ``responses`` stay REAL, driven
+    ``shared`` package (so ``shared.auth`` / ``responses`` stay REAL, driven
     by claim-bearing events).
 
     Returns the (new or supplied) ``FakeSharedDB`` for seeding and side-effect assertions
@@ -586,7 +586,7 @@ def install_fake_db(monkeypatch, fake: Optional[FakeSharedDB] = None) -> FakeSha
     Uses pytest's ``monkeypatch`` so the adapter functions are restored automatically at
     teardown.
     """
-    from backend.functions.agent_invoke import shared_gateway
+    from functions.agent_invoke import shared_gateway
 
     fake = fake or FakeSharedDB()
     for name in _DB_CONTRACT_METHODS:

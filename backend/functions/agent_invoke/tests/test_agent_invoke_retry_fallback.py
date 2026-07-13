@@ -3,7 +3,7 @@
 These are EXAMPLE / UNIT tests (plain pytest — no Hypothesis, no ``property`` marker). They
 pin the retry, Bedrock-fallback, and failure-cleanup orchestration wired in task 6.3
 (``compose_flow_with_retry`` in ``backend/functions/agent_invoke/handler.py``) against the
-in-memory shared stubs installed under ``backend.shared.*`` by the ``install_shared`` fixture
+in-memory shared stubs installed under ``shared.*`` by the ``install_shared`` fixture
 (conftest.py), with the Bedrock ``compose`` call replaced by a scripted fake so no live model
 is invoked.
 
@@ -62,9 +62,9 @@ from agent.schemas import (
     RequestSpec,
     TradeRequirement,
 )
-from backend.functions.agent_invoke import handler
-from backend.functions.agent_invoke.fallback import demo_fallback
-from backend.functions.agent_invoke.persistence import SaveContext
+from functions.agent_invoke import handler
+from functions.agent_invoke.fallback import demo_fallback
+from functions.agent_invoke.persistence import SaveContext
 
 OFFICE_ID = "OFFICE001"
 

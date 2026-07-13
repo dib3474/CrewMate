@@ -28,7 +28,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from backend.functions.agent_invoke.validator import CHECK_MEMBER_EXISTS, validate_output
+from functions.agent_invoke.validator import CHECK_MEMBER_EXISTS, validate_output
 from tests.strategies import valid_scenarios
 
 # Feature: crew-composition-agent, Property 1: 멤버 출처 강제

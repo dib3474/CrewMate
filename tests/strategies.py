@@ -62,7 +62,7 @@ from agent.schemas import (
     RequestSpec,
     TradeRequirement,
 )
-from backend.functions.agent_invoke.validator import (
+from functions.agent_invoke.validator import (
     ValidationContext,
     WorkerStateSnapshot,
 )

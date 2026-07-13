@@ -8,7 +8,7 @@ flow. It does two jobs, both by *consuming* 담당자 A's ``backend/shared/db`` 
    composes against: the work-request spec, the READY candidate pool (office-scoped), and
    the candidates' collaboration history. (Req 6.1, 6.3, 6.4, 6.5 / 2.1-2.4)
 2. :func:`build_validation_context` - assembles the **freshest-snapshot**
-   :class:`~backend.functions.agent_invoke.validator.ValidationContext` used *immediately
+   :class:`~functions.agent_invoke.validator.ValidationContext` used *immediately
    before* validation, so the safety checks judge the Agent output against current worker
    state rather than the (possibly stale) values that were passed into the Agent.
    (Req 7.3, 7.6, 7.7)
@@ -75,7 +75,7 @@ shared helper consumption
 ``backend/shared/*`` is 담당자 A's and is **consumed, never implemented**; it does not
 exist on disk in this scope. ``db`` is imported **lazily inside each function** (matching
 ``persistence.py``) so it resolves at call time - the real Layer module in deployment, or
-the stub installed under ``backend.shared.db`` by ``install_shared_stubs`` in tests -
+the stub installed under ``shared.db`` by ``install_shared_stubs`` in tests -
 regardless of import order. This module performs reads/assembly only: it never writes,
 never transitions state, and never changes worker state (Req 6.4, delegation to 담당자 A).
 
@@ -98,7 +98,7 @@ from agent.schemas import (
     RequestSpec,
     TradeRequirement,
 )
-from backend.functions.agent_invoke.validator import (
+from functions.agent_invoke.validator import (
     ValidationContext,
     WorkerStateSnapshot,
 )
@@ -268,7 +268,7 @@ def assemble_normal_input(request_id: str, office_id: str) -> AgentInput:
     handler's ``REQUESTED → COMPOSING`` conditional transition runs first and already
     proves existence, so this is a defensive guard.)
     """
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter over 담당자 A's backend.shared
+    from functions.agent_invoke import shared_gateway as db  # high-level adapter over 담당자 A's shared
 
     record = db.get_work_request(request_id)
     if record is None:
@@ -336,7 +336,7 @@ def build_validation_context(
     ``trade_headcount`` (Property 4) use server-side truth (see module docstring). A
     recommended worker missing from the fresh read gets no snapshot and thus fails closed.
     """
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter over 담당자 A's backend.shared
+    from functions.agent_invoke import shared_gateway as db  # high-level adapter over 담당자 A's shared
 
     member_ids = _dedupe(output_member_ids)
     fresh_records = db.get_workers(member_ids)  # FRESHEST snapshot, just before validation

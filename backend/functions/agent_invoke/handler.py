@@ -173,7 +173,7 @@ shared helper consumption
 ``backend/shared/*`` is 담당자 A's and is consumed, never implemented (it is absent on
 disk here). ``db`` / ``auth`` / ``response`` are imported LAZILY inside functions (matching
 assembler/persistence) so they resolve at call time - the real Layer in deployment, or the
-stubs installed under ``backend.shared.*`` in tests.
+stubs installed under ``shared.*`` in tests.
 
 Python 3.9 note
 ---------------
@@ -190,21 +190,21 @@ from typing import Any, Dict, List, Optional
 
 from agent.crew_agent import BedrockUnavailable, compose
 from agent.schemas import AgentInput, AgentOutput, Recommendation
-from backend.functions.agent_invoke.assembler import (
+from functions.agent_invoke.assembler import (
     assemble_normal_input,
     build_validation_context,
 )
-from backend.functions.agent_invoke.fallback import demo_fallback
-from backend.functions.agent_invoke.observability import (
+from functions.agent_invoke.fallback import demo_fallback
+from functions.agent_invoke.observability import (
     build_agent_log_record,
     log_agent_execution,
     new_execution_id,
 )
-from backend.functions.agent_invoke.persistence import (
+from functions.agent_invoke.persistence import (
     SaveContext,
     save_normal_proposal,
 )
-from backend.functions.agent_invoke.validator import validate_output
+from functions.agent_invoke.validator import validate_output
 
 __all__ = [
     "handler",
@@ -229,7 +229,7 @@ _MODE_NORMAL = "NORMAL"
 _MODE_EMERGENCY = "EMERGENCY"
 
 # --------------------------------------------------------------------------- #
-# State constants — mirror backend.shared.state (RequestStatus / GapStatus).   #
+# State constants — mirror shared.state (RequestStatus / GapStatus).   #
 # Declared locally (like persistence.py) so this module stays importable       #
 # standalone; values are fixed by the shared-contract glossary in              #
 # requirements.md and verified against tests/mocks/shared_stubs.py.            #
@@ -372,7 +372,7 @@ def _extract_compose_detail(event: Any) -> Dict[str, Any]:
 class _ExecutionTelemetry:
     """Mutable per-execution signals populated by :func:`compose_flow` (a single attempt)
     and consumed by :func:`compose_flow_with_retry` to build EXACTLY ONE
-    :class:`~backend.functions.agent_invoke.observability.AgentLogRecord` per execution.
+    :class:`~functions.agent_invoke.observability.AgentLogRecord` per execution.
 
     Why this exists (task 9.2)
     --------------------------
@@ -514,7 +514,7 @@ def compose_flow(
     this function's ``AGENT_OUTPUT_INVALID`` to decide whether to retry, so extending 6.3 did
     not restructure this working single attempt.
     """
-    from backend.shared import responses  # lazy: real Layer in prod
+    from shared import responses  # lazy: real Layer in prod
 
     active_compose = compose_fn if compose_fn is not None else compose
     use_fallback = _resolve_fallback_enabled(fallback_enabled)
@@ -617,7 +617,7 @@ def _apply_failure_cleanup(
     ``path`` / ``event_id`` are unused for EMERGENCY now (retained on the signature for
     call-site symmetry).
     """
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
+    from functions.agent_invoke import shared_gateway as db  # high-level adapter
 
     if save_ctx.mode == _MODE_NORMAL:
         # NORMAL rollback so the office can compose manually (Req 9.2).
@@ -784,7 +784,7 @@ def _handle_normal(request_id: str, office_id: Optional[str]) -> Dict[str, Any]:
     EventBridge event carries no Cognito principal. ``request_id`` comes from the event
     detail; ``office_id`` is optional and falls back to the WorkRequest's own ``office_id``.
     """
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
+    from functions.agent_invoke import shared_gateway as db  # high-level adapter
 
     # State guard: acquire the REQUESTED -> COMPOSING lock (Req 6.6/6.7). A failed
     # conditional write (wrong state / concurrent duplicate / missing request) -> conflict.
@@ -857,7 +857,7 @@ def handler(event: Any, context: Any = None) -> Dict[str, Any]:
     proxy envelope is what gap_event's internal invoke parses on the EMERGENCY path; on the
     NORMAL path EventBridge ignores the return value.
     """
-    from backend.shared import responses  # lazy: real Layer in prod
+    from shared import responses  # lazy: real Layer in prod
 
     try:
         if _is_internal_invoke(event):

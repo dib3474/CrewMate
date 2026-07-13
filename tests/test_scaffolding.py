@@ -29,9 +29,9 @@ def test_test_dependencies_are_importable():
         "agent",
         "agent.tools",
         "backend",
-        "backend.functions",
-        "backend.functions.agent_invoke",
-        "backend.functions.gap_event",
+        "functions",
+        "functions.agent_invoke",
+        "functions.gap_event",
         "tests.mocks.shared_stubs",
     ],
 )
@@ -39,15 +39,18 @@ def test_scaffolding_packages_importable(module_name):
     assert importlib.import_module(module_name) is not None
 
 
-def test_workspace_root_on_path_is_layer_substitute():
-    # Root must be importable so agent.schemas resolves the SAME module from both
-    # agent_invoke and gap_event function packages (the Lambda Layer substitute path).
-    assert str(ROOT) in sys.path
+def test_agent_package_is_single_shared_contract_source():
+    # After unifying with 담당자 A's packaging, the Agent package lives at backend/agent and
+    # is imported as ``agent.*`` from the ``backend/`` root (put on sys.path by A's
+    # tests/conftest.py, and bundled under CodeUri=backend/ in deployment). ``agent.schemas``
+    # therefore resolves to the SAME module from both function packages.
     agent = importlib.import_module("agent")
     agent_dir = Path(agent.__file__).resolve().parent
-    assert agent_dir == ROOT / "agent"
+    assert agent_dir == ROOT / "backend" / "agent"
     # Re-importing yields the identical package object (a single shared-contract source).
     assert importlib.import_module("agent") is agent
+    # The workspace root stays on sys.path so the ``tests.*`` helper packages still resolve.
+    assert str(ROOT) in sys.path
 
 
 def test_backend_shared_present_after_merge():
@@ -127,9 +130,9 @@ def test_install_shared_stubs_registers_backend_shared(monkeypatch):
 
     stubs = shared_stubs.install_shared_stubs(monkeypatch)
 
-    # Both `from backend.shared import db` and attribute access resolve the stub.
-    from backend.shared import db as db_mod  # type: ignore
-    from backend.shared import response as response_mod  # type: ignore
+    # Both `from shared import db` and attribute access resolve the stub.
+    from shared import db as db_mod  # type: ignore
+    from shared import response as response_mod  # type: ignore
 
     db_mod.instance.add_work_request("REQ9", status="REQUESTED")
     assert db_mod.transition_request_status("REQ9", "REQUESTED", "COMPOSING") is True

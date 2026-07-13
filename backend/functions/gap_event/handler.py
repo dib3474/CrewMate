@@ -117,14 +117,14 @@ import os
 from typing import Any, Dict, List, Optional
 
 from agent.schemas import AgentInput
-from backend.functions.agent_invoke.assembler import assemble_normal_input
-from backend.functions.agent_invoke.observability import (
+from functions.agent_invoke.assembler import assemble_normal_input
+from functions.agent_invoke.observability import (
     build_agent_log_record,
     log_agent_execution,
     new_execution_id,
 )
-from backend.functions.gap_event.emergency_payload import build_emergency_payload
-from backend.functions.gap_event.gap_logic import (
+from functions.gap_event.emergency_payload import build_emergency_payload
+from functions.gap_event.gap_logic import (
     Member,
     compute_fixed_members,
     compute_missing,
@@ -147,7 +147,7 @@ __all__ = [
 _MODE_EMERGENCY = "EMERGENCY"
 
 # --------------------------------------------------------------------------- #
-# GapEvent status constants — mirror backend.shared.state (GapStatus). Declared #
+# GapEvent status constants — mirror shared.state (GapStatus). Declared #
 # locally (like agent_invoke/handler.py) so this module stays importable        #
 # standalone; values are fixed by the shared-contract glossary and verified      #
 # against tests/mocks/shared_stubs.py.                                          #
@@ -447,7 +447,7 @@ def handler(event: Any, context: Any = None) -> Dict[str, Any]:
                           no invoke, no further transition.
     - ``CREW_INVALID`` — the affected crew is missing / has no linked request; no lock, no invoke.
     """
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
+    from functions.agent_invoke import shared_gateway as db  # high-level adapter
 
     detail = _extract_detail(event)
     event_id = detail.get(_DETAIL_EVENT_ID)

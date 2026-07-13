@@ -50,7 +50,7 @@ from agent.schemas import (
     Recommendation,
     TradeRequirement,
 )
-from backend.functions.agent_invoke.validator import (
+from functions.agent_invoke.validator import (
     CHECK_FIXED_PRESERVED,
     CHECK_MEMBER_EXISTS,
     CHECK_NEW_READY,

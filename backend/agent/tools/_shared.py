@@ -12,9 +12,9 @@ installed and *without* 담당자 A's ``backend/shared`` package existing on dis
    is only a TODO in ``requirements.txt``) it degrades to an identity decorator so
    the plain read logic remains directly callable.
 2. :func:`resolve_db` - a **lazy** resolver for 담당자 A's read-only ``db`` helper.
-   Importing ``backend.shared.db`` is deferred to call time so the tool modules
+   Importing ``shared.db`` is deferred to call time so the tool modules
    import cleanly even though ``backend/shared`` is 담당자 A's code and is not
-   created in this repo (tests install a stub under ``backend.shared.*``).
+   created in this repo (tests install a stub under ``shared.*``).
 
 Design references: ``design.md`` -> "3. Agent Tools" / "주 실행 경로: 사전
 조립(pre-assembly) 우선"; ``requirements.md`` -> Requirement 5.
@@ -87,16 +87,16 @@ def resolve_db(db: Any = None) -> Any:
         ``get_worker_collaborations``, ``get_crew``). Tests pass a
         ``FakeSharedDB`` here; the Agent-invoked tool wrappers pass nothing.
 
-    When ``db`` is ``None`` the real ``backend.shared.db`` module is imported
+    When ``db`` is ``None`` the real ``shared.db`` module is imported
     **lazily** (at call time, not import time). In deployment this is 담당자 A's
     module packaged as a shared Lambda Layer; in tests it is the stub registered
-    under ``backend.shared.db`` by ``install_shared_stubs``. Deferring the import
+    under ``shared.db`` by ``install_shared_stubs``. Deferring the import
     keeps every tool module importable even though ``backend/shared`` does not
     exist on disk in this repo.
     """
     if db is not None:
         return db
-    # High-level adapter over 담당자 A's real backend.shared.* (imported lazily by design).
-    from backend.functions.agent_invoke import shared_gateway as shared_db
+    # High-level adapter over 담당자 A's real shared.* (imported lazily by design).
+    from functions.agent_invoke import shared_gateway as shared_db
 
     return shared_db

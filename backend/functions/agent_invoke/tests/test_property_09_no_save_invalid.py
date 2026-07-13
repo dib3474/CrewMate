@@ -56,7 +56,7 @@ Per-example isolation without a function-scoped fixture
 ``@given`` 테스트에 함수 스코프 fixture(예: ``monkeypatch``/``install_shared``)를 주입하면 예시마다
 초기화되지 않아 Hypothesis 의 ``function_scoped_fixture`` 헬스체크가 발생한다. 이를 피하기 위해
 예시 본문에서 ``pytest.MonkeyPatch.context()`` 로 **예시마다 새 stub 을 설치·해제**한다 -
-shared 스텁(db/auth/state/response)이 ``backend.shared.*`` 로 설치되고 컨텍스트 종료 시 자동 복원된다.
+shared 스텁(db/auth/state/response)이 ``shared.*`` 로 설치되고 컨텍스트 종료 시 자동 복원된다.
 
 shared 헬퍼는 소비만 한다: ``backend/shared/*`` 는 담당자 A 소유이며 여기서는 in-memory 스텁
 (``FakeSharedDB``)으로 대체해 side-effect(``save_crew`` / ``transition_*``)를 기록·검증한다.
@@ -70,8 +70,8 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from agent.schemas import AgentInput, AgentOutput, Recommendation
-from backend.functions.agent_invoke.handler import _FlowError, compose_flow
-from backend.functions.agent_invoke.persistence import SaveContext
+from functions.agent_invoke.handler import _FlowError, compose_flow
+from functions.agent_invoke.persistence import SaveContext
 from tests.mocks.shared_stubs import (
     ErrorCode,
     GapStatus,

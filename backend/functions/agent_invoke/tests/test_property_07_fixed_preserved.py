@@ -47,7 +47,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from backend.functions.agent_invoke.validator import CHECK_FIXED_PRESERVED, validate_output
+from functions.agent_invoke.validator import CHECK_FIXED_PRESERVED, validate_output
 from tests.strategies import valid_scenarios
 
 # Feature: crew-composition-agent, Property 7: EMERGENCY에서 fixed_members 보존

@@ -69,7 +69,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from backend.functions.agent_invoke.validator import CHECK_TRADE_HEADCOUNT, validate_output
+from functions.agent_invoke.validator import CHECK_TRADE_HEADCOUNT, validate_output
 from tests.strategies import valid_scenarios
 
 # Feature: crew-composition-agent, Property 4: 필수 직종·인원 충족과 추천안 개수

@@ -9,7 +9,7 @@ against the in-memory ``FakeSharedDB`` that 담당자 B's code now reaches throu
 Trigger model (post Task A/B)
 -----------------------------
 - **DB**: the high-level DB functions are monkeypatched onto ``FakeSharedDB`` via the
-  ``shared_gateway`` adapter (``install_shared``). The real ``backend.shared`` package stays
+  ``shared_gateway`` adapter (``install_shared``). The real ``shared`` package stays
   intact.
 - **Triggers**: NORMAL is a ``ComposeRequested`` EventBridge event (``_normal_event``);
   EMERGENCY is gap_event's trusted internal invoke (``_internal_payload``). There is no API
@@ -42,9 +42,9 @@ from agent.schemas import (
     RequestSpec,
     TradeRequirement,
 )
-from backend.functions.agent_invoke import handler
-from backend.functions.agent_invoke.persistence import SaveContext
-from backend.functions.gap_event.emergency_payload import build_emergency_payload
+from functions.agent_invoke import handler
+from functions.agent_invoke.persistence import SaveContext
+from functions.gap_event.emergency_payload import build_emergency_payload
 
 OFFICE_ID = "OFFICE001"
 

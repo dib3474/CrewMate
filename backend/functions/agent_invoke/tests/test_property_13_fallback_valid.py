@@ -50,8 +50,8 @@ import pytest
 from hypothesis import given, settings
 
 from agent.schemas import AgentInput
-from backend.functions.agent_invoke.fallback import demo_fallback
-from backend.functions.agent_invoke.validator import (
+from functions.agent_invoke.fallback import demo_fallback
+from functions.agent_invoke.validator import (
     ValidationContext,
     WorkerStateSnapshot,
     validate_output,

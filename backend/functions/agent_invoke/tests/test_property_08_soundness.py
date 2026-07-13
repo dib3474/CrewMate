@@ -54,7 +54,7 @@ from __future__ import annotations
 import pytest
 from hypothesis import given, settings
 
-from backend.functions.agent_invoke.validator import CHECK_NAMES, validate_output
+from functions.agent_invoke.validator import CHECK_NAMES, validate_output
 from tests.strategies import valid_scenarios
 
 # Feature: crew-composition-agent, Property 8: 검증기 건전성

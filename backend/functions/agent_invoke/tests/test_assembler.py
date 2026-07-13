@@ -11,7 +11,7 @@ Covers the two public functions of ``backend/functions/agent_invoke/assembler.py
   current truth (Req 7.3, 7.6, 7.7).
 
 These are example/unit tests (task 5.1 has no Correctness Property of its own). They use
-the shared ``db`` stub installed under ``backend.shared.*`` via the ``install_shared``
+the shared ``db`` stub installed under ``shared.*`` via the ``install_shared``
 fixture (conftest.py), matching the lazy-import consumption pattern of the module.
 """
 from __future__ import annotations
@@ -19,11 +19,11 @@ from __future__ import annotations
 import pytest
 
 from agent.schemas import AgentInput, Candidate, FixedMember, TradeRequirement
-from backend.functions.agent_invoke.assembler import (
+from functions.agent_invoke.assembler import (
     assemble_normal_input,
     build_validation_context,
 )
-from backend.functions.agent_invoke.validator import validate_output
+from functions.agent_invoke.validator import validate_output
 
 
 # --------------------------------------------------------------------------- #

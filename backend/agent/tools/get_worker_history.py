@@ -90,7 +90,7 @@ def _read_worker_history(worker_ids: Sequence[str], *, db: Any = None) -> Dict[s
     a per-worker collaboration count; the raw collaboration pairs (already limited
     to the queried workers) are included for teamwork context. No PII is returned.
     ``db`` may be dependency-injected for tests; otherwise 담당자 A's
-    ``backend.shared.db`` is resolved lazily.
+    ``shared.db`` is resolved lazily.
     """
     ids = list(worker_ids)
     helper = resolve_db(db)

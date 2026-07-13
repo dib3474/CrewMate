@@ -8,8 +8,8 @@ designed flows.
 REAL (wired together, not stubbed):
 - ``agent_invoke`` handler → assembler → validator → persistence orchestration.
 - ``gap_event`` handler → gap_logic → ``build_emergency_payload`` → trusted internal invoke.
-- ``backend.shared.auth`` (real ``get_principal`` / ``require_role``, driven by claims) and
-  ``backend.shared.responses`` (handlers return proxy responses).
+- ``shared.auth`` (real ``get_principal`` / ``require_role``, driven by claims) and
+  ``shared.responses`` (handlers return proxy responses).
 - The freshest-snapshot validation context built from the same in-memory DB.
 
 Mocked / stubbed (the four external boundaries):
@@ -30,8 +30,8 @@ import json
 from collections import Counter
 
 from agent.schemas import AgentInput, AgentOutput, Recommendation
-from backend.functions.agent_invoke import handler as agent_invoke_handler
-from backend.functions.gap_event import handler as gap_handler
+from functions.agent_invoke import handler as agent_invoke_handler
+from functions.gap_event import handler as gap_handler
 
 OFFICE_ID = "OFFICE001"
 

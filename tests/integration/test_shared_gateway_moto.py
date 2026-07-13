@@ -2,17 +2,17 @@
 
 Unlike the other 담당자 B tests — which drive the flow against the in-memory ``FakeSharedDB``
 through the adapter — this module proves the adapter + a full NORMAL compose flow work against
-담당자 A's REAL ``backend.shared.db`` on a moto-mocked DynamoDB single table. It is the
+담당자 A's REAL ``shared.db`` on a moto-mocked DynamoDB single table. It is the
 capstone that shows checkpoint-2 compatibility is REAL, not just stub-shaped.
 
 What is REAL here
 -----------------
-- ``backend.shared.db`` (real low-level single-table API) against a moto ``CrewMate-test``
+- ``shared.db`` (real low-level single-table API) against a moto ``CrewMate-test``
   table (the teammate's ``table`` fixture from ``tests/conftest.py``).
-- ``backend.shared.schemas`` item builders + ``backend.shared.state`` enums.
+- ``shared.schemas`` item builders + ``shared.state`` enums.
 - The ``shared_gateway`` adapter and the agent_invoke handler → assembler → validator →
   persistence chain.
-- ``backend.shared.responses`` (the proxy envelope the handler returns). NORMAL is triggered
+- ``shared.responses`` (the proxy envelope the handler returns). NORMAL is triggered
   by a ``ComposeRequested`` EventBridge event (no Cognito principal).
 
 Only Bedrock is mocked (``compose`` monkeypatched to a deterministic fake).
@@ -21,7 +21,7 @@ Module-object caching note (from the task brief)
 ------------------------------------------------
 The real ``db.py`` caches ``_resource`` / ``_table`` and reads ``TABLE_NAME`` at import. The
 teammate ``table`` fixture resets ``shared.db`` (imported as top-level ``shared.db``), but the
-adapter imports ``backend.shared.db`` — a DISTINCT module object. The ``real_table`` fixture
+adapter imports ``shared.db`` — a DISTINCT module object. The ``real_table`` fixture
 below therefore rebinds the SAME module object the adapter uses to the moto table
 (``TABLE_NAME`` + cache reset), so the adapter provably hits moto.
 """
@@ -34,26 +34,26 @@ from collections import Counter
 import pytest
 
 from agent.schemas import AgentInput, AgentOutput, Recommendation
-from backend.functions.agent_invoke import handler as agent_invoke_handler
-from backend.functions.agent_invoke import shared_gateway as sg
-from backend.shared import db as shared_db
-from backend.shared import schemas
-from backend.shared.state import CrewStatus, GapStatus, GapType, RequestStatus, WorkerState
+from functions.agent_invoke import handler as agent_invoke_handler
+from functions.agent_invoke import shared_gateway as sg
+from shared import db as shared_db
+from shared import schemas
+from shared.state import CrewStatus, GapStatus, GapType, RequestStatus, WorkerState
 
 OFFICE_ID = "OFFICE001"
 COMPANY_ID = "COMPANY001"
 
 
 # --------------------------------------------------------------------------- #
-# Fixture: bind the ADAPTER's backend.shared.db to the moto CrewMate-test table #
+# Fixture: bind the ADAPTER's shared.db to the moto CrewMate-test table #
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def real_table(table):
-    """Point the adapter's ``backend.shared.db`` at the moto ``CrewMate-test`` table.
+    """Point the adapter's ``shared.db`` at the moto ``CrewMate-test`` table.
 
     Depends on the teammate ``table`` fixture (creates the moto table inside ``mock_aws``).
     That fixture resets the top-level ``shared.db`` cache, but the adapter imports
-    ``backend.shared.db`` — a different module object — so here we rebind THAT object's
+    ``shared.db`` — a different module object — so here we rebind THAT object's
     ``TABLE_NAME`` (to the env value the ``_aws_env`` fixture set) and clear its lazy caches,
     guaranteeing the adapter's ``get_table()`` binds to the moto-mocked table. Restored on
     teardown.

@@ -20,7 +20,7 @@ def _read_current_crew(crew_id: str, *, db: Any = None) -> Any:
     """Core read logic: return the current crew for ``crew_id``.
 
     Read-only. Calls only ``db.get_crew`` (Requirement 5.5). ``db`` may be
-    dependency-injected for tests; otherwise 담당자 A's ``backend.shared.db`` is
+    dependency-injected for tests; otherwise 담당자 A's ``shared.db`` is
     resolved lazily.
     """
     return resolve_db(db).get_crew(crew_id)

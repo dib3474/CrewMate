@@ -49,7 +49,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from backend.functions.agent_invoke.validator import (
+from functions.agent_invoke.validator import (
     CHECK_NEW_READY,
     CHECK_NO_CONFLICT_ASSIGNMENT,
     validate_output,

@@ -38,7 +38,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from backend.functions.agent_invoke.validator import CHECK_NO_DUP, validate_output
+from functions.agent_invoke.validator import CHECK_NO_DUP, validate_output
 from tests.strategies import valid_scenarios
 
 # Feature: crew-composition-agent, Property 3: 추천안 내 중복 멤버 금지

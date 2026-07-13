@@ -21,8 +21,8 @@ Python 3.9: ``from __future__ import annotations`` keeps annotations lazy.
 """
 from __future__ import annotations
 
-from backend.functions.gap_event import handler as gap_handler
-from backend.shared import responses
+from functions.gap_event import handler as gap_handler
+from shared import responses
 
 OFFICE_ID = "OFFICE001"
 EVENT_ID = "GAP1"
@@ -257,7 +257,7 @@ def test_missing_crew_returns_crew_invalid_without_lock_or_invoke(install_shared
 # =========================================================================== #
 def test_lock_failure_returns_conflict_without_invoking(install_shared, monkeypatch):
     """A failed DETECTED → RECOMPOSING lock short-circuits to CONFLICT before the invoke."""
-    from backend.functions.agent_invoke import shared_gateway  # the adapter the handler calls
+    from functions.agent_invoke import shared_gateway  # the adapter the handler calls
 
     db = install_shared.db
     _seed_detected_gap(db)

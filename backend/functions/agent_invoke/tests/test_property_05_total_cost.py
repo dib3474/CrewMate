@@ -43,7 +43,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from backend.functions.agent_invoke.validator import CHECK_TOTAL_COST, validate_output
+from functions.agent_invoke.validator import CHECK_TOTAL_COST, validate_output
 from tests.strategies import valid_scenarios
 
 # Feature: crew-composition-agent, Property 5: total_cost는 서버 계산 임금 합과 일치

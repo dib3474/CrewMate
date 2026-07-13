@@ -36,7 +36,7 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from backend.functions.agent_invoke.observability import (
+from functions.agent_invoke.observability import (
     LOGGER_NAME,
     AgentLogRecord,
     build_agent_log_record,
