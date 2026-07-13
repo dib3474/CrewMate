@@ -1,0 +1,8 @@
+# Test / development dependencies.
+#   python -m venv .venv && . .venv/bin/activate
+#   pip install -r requirements-dev.txt
+#
+# Verified locally on Python 3.9.6 with: pytest 8.4.2, hypothesis 6.141.1, pydantic 2.13.4
+-r requirements.txt
+pytest>=7.4
+hypothesis>=6.90

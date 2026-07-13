@@ -1,0 +1,9 @@
+# Runtime dependencies for 담당자 B (Crew Composition Agent) scope.
+# Kept intentionally minimal at scaffolding time. Agent-runtime dependencies are
+# added by their own tasks so versions can be verified when the code that needs
+# them lands.
+pydantic>=2,<3
+
+# Added by later tasks (agent runtime - tasks 2.x):
+#   strands-agents   # Strands Agents SDK - the single Crew Composition Agent
+#   boto3            # Amazon Bedrock client

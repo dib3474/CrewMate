@@ -1,0 +1,25 @@
+# CrewMate - 담당자 B (Crew Composition Agent / Agent Invoke / Gap Event) scope.
+#
+# This file configures the Python test tooling only. Runtime packaging and
+# deployment (SAM / DynamoDB / Cognito / API Gateway) are owned by 담당자 A.
+#
+# Import-path note (Lambda Layer substitute):
+#   `pythonpath = ["."]` places the workspace root on sys.path during local dev/test
+#   so that the shared Agent contract module `agent.schemas` (added in task 1.2)
+#   resolves to the SAME module from BOTH Lambda function packages:
+#     - backend/functions/agent_invoke
+#     - backend/functions/gap_event
+#   In deployment this shared module is packaged as a common Lambda Layer; on the
+#   local test path this pythonpath entry stands in for that Layer.
+
+[tool.pytest.ini_options]
+minversion = "7.4"
+pythonpath = ["."]
+testpaths = ["agent", "backend", "tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra --strict-markers"
+markers = [
+    "property: property-based test that validates a design.md Correctness Property",
+]
