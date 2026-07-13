@@ -114,19 +114,6 @@ def _normal_event(request_id, *, role="OFFICE", office_id=OFFICE_ID):
     }
 
 
-def _recompose_event(event_id, *, role="OFFICE", office_id=OFFICE_ID):
-    """An API Gateway proxy event for ``POST .../gap-events/{eventId}/agent-recompose``."""
-    return {
-        "resource": "/office/gap-events/{eventId}/agent-recompose",
-        "httpMethod": "POST",
-        "requestContext": {
-            "requestId": "apigw-emergency",
-            "authorizer": {"claims": _claims(role, office_id)},
-        },
-        "pathParameters": {"eventId": event_id},
-    }
-
-
 def _gap_detected_eventbridge_event(event_id, crew_id, request_id, gap_type="NO_SHOW",
                                     missing_worker_ids=("C",), *, office_id=OFFICE_ID):
     """An EventBridge ``GapEventDetected`` event, as ``company_request`` would publish it.
@@ -320,14 +307,19 @@ def test_emergency_internal_invoke_end_to_end_no_show_recompose(install_shared, 
     fixed_ids = sorted(f["worker_id"] for f in payload["agent_input"]["fixed_members"])
     assert fixed_ids == ["A", "B"]
 
-    # --- agent_invoke saved Crew(PROPOSED, source=AGENT) WITHOUT a WorkRequest transition ---
-    assert len(db.saved_crews) == 1
-    crew = db.saved_crews[0]
-    assert crew["status"] == "PROPOSED"
-    assert crew["source"] == "AGENT"
-    # A+B+E recommended: fixed members preserved, departed C excluded, replacement E filled.
-    assert set(crew["member_ids"]) == {"A", "B", "E"}
-    assert "C" not in crew["member_ids"]
+    # --- Option-1 hand-off: NO Crew is created; the recommendations are recorded on the
+    #     GapEvent (fixed_member_ids + {replacement_member_ids, total_cost, reason}) ---
+    assert db.saved_crews == []
+    # fixed members = active(A,B,C) − departed(C) = A, B (retained, kept RUNNING).
+    assert db.gap_events[event_id]["fixed_member_ids"] == ["A", "B"]
+    recs = db.gap_events[event_id]["recommendations"]
+    assert len(recs) == 1
+    # Only the NEW hire E is a replacement; A/B are retained (not "replacements"), C excluded.
+    assert recs[0]["replacement_member_ids"] == ["E"]
+    assert "C" not in recs[0]["replacement_member_ids"]
+    # The handler surfaced the same option-1 data in its status dict.
+    assert result["fixed_member_ids"] == ["A", "B"]
+    assert result["recommendations"] == recs
     # EMERGENCY must NOT touch the WorkRequest state machine (it is RUNNING).
     assert db.status_transitions == []
     assert db.work_requests["REQ-E1"]["status"] == "RUNNING"
@@ -357,65 +349,6 @@ def test_emergency_internal_invoke_end_to_end_no_show_recompose(install_shared, 
     assert db.workers["E"]["state"] == "READY"    # replacement not reserved/assigned
 
 
-# =========================================================================== #
-# Path 3 — EMERGENCY external/direct agent-recompose                           #
-# =========================================================================== #
-def test_emergency_external_recompose_end_to_end(install_shared, monkeypatch):
-    """External OFFICE agent-recompose end-to-end: agent_invoke self-locks, assembles the
-    EMERGENCY payload SERVER-SIDE, saves Crew(PROPOSED) without a WorkRequest transition, and
-    (compose_flow) owns the terminal ``RECOMPOSING→PROPOSED``.
-    """
-    db = install_shared.db
-    _seed_running_crew_ABC(db, crew_id="CREW-X1", request_id="REQ-X1")
-    # A GapEvent already DETECTED (as gap_event would have saved it) links to the crew.
-    db.add_gap_event("GE-X1", status="DETECTED", crew_id="CREW-X1",
-                     missing_worker_ids=["C"], gap_type="LEFT_SITE", office_id=OFFICE_ID)
-
-    monkeypatch.setattr(agent_invoke_handler, "compose", _fake_compose)
-
-    resp = agent_invoke_handler.handler(_recompose_event("GE-X1"))
-    body = _body(resp)
-
-    # --- success response: EMERGENCY, links the GapEvent (in the RESPONSE, not the Crew item) ---
-    assert body["success"] is True
-    assert body["data"]["mode"] == "EMERGENCY"
-    assert body["data"]["gap_event_id"] == "GE-X1"
-
-    # --- server-side assembly happened: crew looked up + READY candidates queried ---
-    assert db.method_calls("get_crew")[0]["crew_id"] == "CREW-X1"
-    assert db.method_calls("query_ready_workers")  # server-side candidate pool assembly
-
-    # --- Crew(PROPOSED, source=AGENT) reflects fixed members + filled shortage, C excluded ---
-    assert len(db.saved_crews) == 1
-    crew = db.saved_crews[0]
-    assert crew["status"] == "PROPOSED"
-    assert crew["source"] == "AGENT"
-    assert set(crew["member_ids"]) == {"A", "B", "E"}
-    assert "C" not in crew["member_ids"]
-    # EMERGENCY never transitions the WorkRequest (it is RUNNING).
-    assert db.status_transitions == []
-    assert db.work_requests["REQ-X1"]["status"] == "RUNNING"
-
-    # --- terminal-transition ownership: agent_invoke (compose_flow) owns it on the EXTERNAL
-    #     route because it self-acquired the lock (Req 10.7 mirror). ---
-    gap_transitions = [(t["expected"], t["target"], t["ok"]) for t in db.gap_status_transitions]
-    assert gap_transitions == [
-        ("DETECTED", "RECOMPOSING", True),   # agent_invoke self-acquired the lock
-        ("RECOMPOSING", "PROPOSED", True),   # agent_invoke owns the terminal transition
-    ]
-    assert db.gap_events["GE-X1"]["status"] == "PROPOSED"
-    # PROPOSED-only scope: never APPROVED/FILLED.
-    _targets = {t["target"] for t in db.gap_status_transitions}
-    _expecteds = {t["expected"] for t in db.gap_status_transitions}
-    assert "APPROVED" not in _targets and "FILLED" not in _targets
-    assert "APPROVED" not in _expecteds and "FILLED" not in _expecteds
-
-    # --- freshest snapshot fed the validator (get_workers for the recommended members) ---
-    get_workers_calls = db.method_calls("get_workers")
-    assert len(get_workers_calls) == 1
-    assert set(get_workers_calls[0]["worker_ids"]) == {"A", "B", "E"}
-
-    # --- no worker-state change (assignment/approval is 담당자 A's) ---
-    assert db.workers["A"]["state"] == "RUNNING"
-    assert db.workers["C"]["state"] == "RUNNING"
-    assert db.workers["E"]["state"] == "READY"
+# NOTE: The former "Path 3 — EMERGENCY external/direct agent-recompose" end-to-end test was
+# removed with the external ``agent-recompose`` route (decision 5). EMERGENCY is now driven
+# exclusively by the gap_event EventBridge → trusted internal invoke path exercised in Path 2.

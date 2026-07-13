@@ -67,6 +67,7 @@ __all__ = [
     "save_gap_event",
     "transition_request_status",
     "transition_gap_event_status",
+    "record_gap_recommendations",
 ]
 
 _META = "META"
@@ -265,6 +266,56 @@ def transition_gap_event_status(event_id: str, expected: str, target: str) -> bo
                 ":t": target,
                 ":e": expected,
                 ":g": _db.gap_gsi1sk(target, event_id),
+                ":u": _schemas.now_iso(),
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == _CONDITIONAL_CHECK_FAILED:
+            return False
+        raise
+
+
+def record_gap_recommendations(
+    event_id: str,
+    *,
+    fixed_member_ids: Iterable[str],
+    recommendations: List[Dict[str, Any]],
+    expected: str,
+    target: str,
+) -> bool:
+    """Conditionally transition a GapEvent ``expected → target`` AND record the EMERGENCY
+    recommendations on the item, in ONE atomic conditional write; ``False`` on state conflict.
+
+    This is the option-1 EMERGENCY hand-off write (담당자 B): no separate Crew is created for
+    an emergency re-composition. Instead the retained team (``fixed_member_ids``) and the
+    Agent's 1..3 alternatives (``recommendations`` — each ``{replacement_member_ids,
+    total_cost, reason}``) are written straight onto the GapEvent so 담당자 A's emergency
+    approval API (``approve_emergency``) can read them and the OFFICE can pick a
+    ``replacement_member_ids`` set to approve.
+
+    Same conditional-write shape as :func:`transition_gap_event_status` (status + ``GSI1SK`` +
+    ``updated_at`` guarded by ``status = expected``), extended to also SET ``fixed_member_ids``
+    and ``recommendations``. Combining the transition with the recommendation write keeps the
+    two consistent — a state conflict (``ConditionalCheckFailedException`` → ``False``) leaves
+    both the status and the recommendations untouched.
+    """
+    try:
+        _db.update_item(
+            _db.gap_pk(event_id),
+            _META,
+            UpdateExpression=(
+                "SET #status = :t, GSI1SK = :g, fixed_member_ids = :f, "
+                "recommendations = :r, updated_at = :u"
+            ),
+            ConditionExpression="#status = :e",
+            ExpressionAttributeNames=dict(_STATUS_NAME),
+            ExpressionAttributeValues={
+                ":t": target,
+                ":e": expected,
+                ":g": _db.gap_gsi1sk(target, event_id),
+                ":f": list(fixed_member_ids),
+                ":r": list(recommendations),
                 ":u": _schemas.now_iso(),
             },
         )

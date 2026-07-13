@@ -327,42 +327,6 @@ def test_emergency_internal_touches_neither_work_request_nor_gap_event(install_s
     assert db.gap_events["GE1"]["status"] == "RECOMPOSING"
 
 
-def test_emergency_external_transitions_gap_event_to_failed_with_guidance(install_shared):
-    """EMERGENCY EXTERNAL agent-recompose: on failure, agent_invoke owns RECOMPOSING->FAILED.
-
-    Because agent_invoke holds the lock on the external route, it performs the terminal
-    ``RECOMPOSING -> FAILED`` transition (exactly once) and attaches manual-composition
-    guidance to the AGENT_RETRY_FAILED message. It still never touches the WorkRequest and
-    never saves.
-    """
-    db = install_shared.db
-    _seed_emergency(db)
-    agent_input = _emergency_input()
-    save_ctx = SaveContext(mode="EMERGENCY", request_id="REQ_E", office_id=OFFICE_ID,
-                           current_crew_id="CREW1", gap_event_id="GE1")
-    scripted = _ScriptedCompose(
-        _invalid_output("REQ_E", "EMERGENCY"), _invalid_output("REQ_E", "EMERGENCY")
-    )
-
-    with pytest.raises(handler._FlowError) as excinfo:
-        handler.compose_flow_with_retry(
-            agent_input, save_ctx, path=handler._PATH_EXTERNAL, event_id="GE1",
-            compose_fn=scripted, fallback_enabled=False,
-        )
-
-    assert excinfo.value.code == "AGENT_RETRY_FAILED"
-    assert "수동 편성" in excinfo.value.message  # manual-composition guidance (Req 10.9)
-    # EXTERNAL path owns the GapEvent terminal transition: exactly one RECOMPOSING -> FAILED.
-    gap_failed = [t for t in db.gap_status_transitions
-                  if t["expected"] == "RECOMPOSING" and t["target"] == "FAILED"]
-    assert len(gap_failed) == 1
-    assert gap_failed[0]["ok"] is True
-    assert db.gap_events["GE1"]["status"] == "FAILED"
-    # WorkRequest untouched (it may be RUNNING); nothing saved.
-    assert db.status_transitions == []
-    assert db.saved_crews == []
-
-
 # =========================================================================== #
 # 5. Bedrock fallback on/off branch (Req 9.4 / 9.2)                            #
 # =========================================================================== #

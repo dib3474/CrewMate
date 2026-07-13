@@ -6,24 +6,26 @@ It deliberately keeps the **NORMAL** and **EMERGENCY** save flows on separate,
 explicit code paths so that only the NORMAL path ever transitions the associated
 WorkRequest.
 
-Why the flows are split (design.md → "저장 흐름 분리", tasks.md Overview)
-----------------------------------------------------------------------
+NORMAL-only crew persistence (option-1 EMERGENCY hand-off)
+---------------------------------------------------------
+Only the **NORMAL** flow persists a Crew here:
+
 - **NORMAL** : save the Crew, THEN transition the WorkRequest ``COMPOSING → PROPOSED``
   (Req 8.1, 8.2). The invoke handler already acquired the lock at entry
   (``REQUESTED → COMPOSING``), so this terminal transition closes the compose flow.
-- **EMERGENCY** : save the Crew ONLY (Req 8.1). It must NOT touch the WorkRequest
-  state machine — during an emergency re-composition the original WorkRequest may
-  already be ``RUNNING``, and rewinding/altering it would corrupt a live assignment.
-  It must NOT transition the GapEvent either: the GapEvent terminal transition
-  (``RECOMPOSING → PROPOSED`` / ``FAILED``) is owned by the *path owner's*
-  orchestration (the trusted-internal gap_event Lambda, or the external
-  ``agent-recompose`` compose_flow), never by this save function.
+- **EMERGENCY** : NO Crew is created. Under the option-1 emergency hand-off the validated
+  1..3 recommendations are written straight onto the GapEvent item (retained
+  ``fixed_member_ids`` + ``recommendations``) by the gap_event Lambda via
+  ``shared_gateway.record_gap_recommendations``; 담당자 A's emergency approval API reads
+  them and the OFFICE approves a ``replacement_member_ids`` set. So the EMERGENCY compose
+  flow never calls a save function here, never touches the WorkRequest (it may be
+  ``RUNNING``), and never transitions the GapEvent (gap_event owns that terminal transition).
 
 Safety invariant (underpins Property 9, tested in task 5.4)
 -----------------------------------------------------------
-Neither function performs any worker state change, approval, or assignment — those
-are delegated to 담당자 A's approval API. The only side effects here are
-``save_crew`` (both flows) and, for NORMAL only, ``transition_request_status``.
+The NORMAL save performs no worker state change, approval, or assignment — those are
+delegated to 담당자 A's approval API. Its only side effects are ``save_crew`` and
+``transition_request_status``.
 
 shared helper consumption (design.md → "소비하는 shared 계약")
 ------------------------------------------------------------
@@ -49,7 +51,6 @@ from agent.schemas import Recommendation
 __all__ = [
     "SaveContext",
     "save_normal_proposal",
-    "save_emergency_proposal",
     "save_proposal",
 ]
 
@@ -167,34 +168,18 @@ def save_normal_proposal(recommendation: Recommendation, ctx: SaveContext) -> st
     return crew_id
 
 
-def save_emergency_proposal(recommendation: Recommendation, ctx: SaveContext) -> str:
-    """EMERGENCY: save the Crew ONLY. Never transition WorkRequest or GapEvent.
-
-    During emergency re-composition the original WorkRequest may already be ``RUNNING``;
-    this path must not rewind or alter the WorkRequest state machine. The GapEvent
-    terminal transition (``RECOMPOSING → PROPOSED`` / ``FAILED``) is owned by the path
-    owner's orchestration (trusted-internal gap_event Lambda per Req 10.7, or the
-    external ``agent-recompose`` compose_flow), not by this save function.
-
-    Returns the ``crew_id`` (assigned by the db helper when ``ctx.crew_id`` is unset).
-    Performs no worker state change, approval, or assignment (delegated to 담당자 A).
-    """
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
-
-    crew_id = _save_crew_via_adapter(db, recommendation, ctx)
-    # Intentionally no WorkRequest transition and no GapEvent transition here.
-    return crew_id
-
-
 def save_proposal(recommendation: Recommendation, ctx: SaveContext) -> str:
-    """Dispatch to the mode-specific save flow (design.md ``save_proposal``).
+    """Dispatch the (NORMAL-only) crew save flow (design.md ``save_proposal``).
 
-    A single, explicit branch point so that ONLY NORMAL can ever transition the
-    WorkRequest. An unknown mode raises rather than silently falling through to a
-    state-mutating path (defensive: a malformed mode must never trigger a transition).
+    Only NORMAL persists a Crew. EMERGENCY does NOT create a Crew under the option-1
+    hand-off (the gap_event Lambda records the recommendations onto the GapEvent instead),
+    so an ``EMERGENCY`` context here is a programming error and raises rather than silently
+    saving a crew. An unknown mode likewise raises (defensive: a malformed mode must never
+    trigger a state-mutating save).
     """
     if ctx.mode == MODE_NORMAL:
         return save_normal_proposal(recommendation, ctx)
-    if ctx.mode == MODE_EMERGENCY:
-        return save_emergency_proposal(recommendation, ctx)
-    raise ValueError(f"unknown SaveContext.mode: {ctx.mode!r}")
+    raise ValueError(
+        f"save_proposal only persists NORMAL crews; got mode={ctx.mode!r} "
+        "(EMERGENCY recommendations are recorded on the GapEvent, not saved as a Crew)"
+    )

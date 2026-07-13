@@ -42,9 +42,14 @@ _AGENT_RECS = [
 # --------------------------------------------------------------------------- #
 # Fake agent_invoke seam (no live Lambda / boto3) — returns PROXY responses     #
 # --------------------------------------------------------------------------- #
-def _success_response(crew_id="CREW#AGENT-1"):
-    """A well-formed agent_invoke PROXY success response (a saved EMERGENCY proposal)."""
-    return responses.success({"crew_id": crew_id, "recommendations": _AGENT_RECS})
+def _success_response():
+    """A well-formed agent_invoke PROXY success response for EMERGENCY (option-1 hand-off).
+
+    Under option 1 agent_invoke creates NO Crew: it returns the validated recommendations
+    (each with the FULL ``member_ids`` = fixed + new) and no ``crew_id``. gap_event reshapes
+    these into ``{replacement_member_ids, total_cost, reason}`` and records them on the GapEvent.
+    """
+    return responses.success({"recommendations": _AGENT_RECS})
 
 
 def _failure_response(code="AGENT_RETRY_FAILED", message="재시도 후에도 검증 실패"):
@@ -154,12 +159,24 @@ def test_emergency_happy_path_recomposes_to_proposed(install_shared, monkeypatch
 
     result = gap_handler.handler(_eventbridge_event(missing_worker_ids=["F2"]))
 
-    # --- Plain status dict (NOT an HTTP proxy response): PROPOSED, EMERGENCY, agent data ---
+    # --- Plain status dict (NOT an HTTP proxy response): PROPOSED, EMERGENCY, option-1 data ---
     assert result["gap_status"] == "PROPOSED"
     assert result["mode"] == "EMERGENCY"
     assert result["event_id"] == EVENT_ID
-    assert result["crew_id"] == "CREW#AGENT-1"
-    assert result["recommendations"] == _AGENT_RECS
+    # Option-1 hand-off: no Crew is created; the GapEvent carries fixed_member_ids + the
+    # reshaped recommendations ({replacement_member_ids, total_cost, reason}).
+    assert "crew_id" not in result
+    assert result["fixed_member_ids"] == ["F1"]  # active(F1,F2) minus departed(F2)
+    assert result["recommendations"] == [
+        {
+            "replacement_member_ids": ["N1"],  # rec member_ids ["F1","N1"] minus fixed {F1}
+            "total_cost": _AGENT_RECS[0]["total_cost"],
+            "reason": _AGENT_RECS[0]["reason"],
+        }
+    ]
+    # --- The recommendations + fixed_member_ids were written onto the GapEvent item ---
+    assert db.gap_events[EVENT_ID]["fixed_member_ids"] == ["F1"]
+    assert db.gap_events[EVENT_ID]["recommendations"] == result["recommendations"]
 
     # --- The GapEvent was NOT created here (company_request did) ---
     assert db.method_calls("save_gap_event") == []

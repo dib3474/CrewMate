@@ -14,29 +14,30 @@ Design references
   state guard), 10.6/10.7/10.10 (EMERGENCY payload + terminal transition + not-found),
   11.1/11.2/11.3/11.4 (execution-trigger authorization).
 
-Three entry paths, distinguished by EVENT SHAPE (not a trusted payload flag)
-----------------------------------------------------------------------------
+Two entry paths, distinguished by EVENT SHAPE (not a trusted payload flag)
+--------------------------------------------------------------------------
 1. ``POST /office/requests/{requestId}/agent-compose``  -> NORMAL  (external/direct,
    via API Gateway proxy event).
-2. ``POST /office/gap-events/{eventId}/agent-recompose`` -> EMERGENCY direct trigger
-   (external/direct, via API Gateway proxy event).
-3. gap_event Lambda's **trusted internal invoke** -> EMERGENCY, consuming a
+2. gap_event Lambda's **trusted internal invoke** -> EMERGENCY, consuming a
    pre-assembled payload (a plain invoke dict, NOT an API Gateway event).
 
-:func:`_is_internal_invoke` routes by the event's *shape*: an API Gateway proxy event
-carries ``requestContext`` / ``httpMethod`` / ``resource`` / ``pathParameters``, whereas
-gap_event's internal invoke is a plain dict carrying the EMERGENCY payload plus an
-explicit ``internal_invoke`` marker and ``event_id``.
+EMERGENCY is driven EXCLUSIVELY by the gap_event Lambda's EventBridge → trusted internal
+invoke path; there is no external ``agent-recompose`` API route (the direct EMERGENCY
+route was removed — decision 5). ``_is_internal_invoke`` routes by the event's *shape*: an
+API Gateway proxy event carries ``requestContext`` / ``httpMethod`` / ``resource`` /
+``pathParameters``, whereas gap_event's internal invoke is a plain dict carrying the
+EMERGENCY payload plus an explicit ``internal_invoke`` marker and ``event_id``.
 
     IMPORTANT - the real trust boundary is IAM, not the payload marker. The
     ``internal_invoke`` key is only a *routing hint*: a payload flag is spoofable, so it
     can never be the security control. Access is enforced two ways: the API Gateway
-    routes require the OFFICE role (below), and the internal invoke is locked down by IAM
-    so that ONLY gap_event's Lambda execution role may invoke agent_invoke directly. That
-    IAM policy is 담당자 A's infrastructure scope; this handler documents and relies on it.
+    ``agent-compose`` route requires the OFFICE role (below), and the internal invoke is
+    locked down by IAM so that ONLY gap_event's Lambda execution role may invoke
+    agent_invoke directly. That IAM policy is 담당자 A's infrastructure scope; this handler
+    documents and relies on it.
 
-Internal-invoke payload contract (defined here; gap_event task 8.5 MUST match it)
----------------------------------------------------------------------------------
+Internal-invoke payload contract (defined here; gap_event MUST match it)
+------------------------------------------------------------------------
 gap_event invokes agent_invoke synchronously with a JSON-serializable dict::
 
     {
@@ -44,60 +45,47 @@ gap_event invokes agent_invoke synchronously with a JSON-serializable dict::
         "mode": "EMERGENCY",                     # always EMERGENCY on this path
         "event_id": "<GapEvent id>",             # the GapEvent gap_event already locked
         "agent_input": { ...AgentInput dict... },# pre-assembled EMERGENCY payload
-        "office_id": "<office id>",              # optional linkage for the saved Crew
+        "office_id": "<office id>",              # optional linkage
         "current_crew_id": "<crew being recomposed>"  # optional linkage
     }
 
 ``agent_input`` is an :class:`~agent.schemas.AgentInput` serialized via ``model_dump()``
 (gap_event builds it with ``build_emergency_payload``); this handler re-parses it with
 :meth:`AgentInput.model_validate`. The ``mode`` / ``event_id`` / ``office_id`` /
-``current_crew_id`` keys carry routing + Crew-linkage metadata.
+``current_crew_id`` keys carry routing + linkage metadata.
 
 Authorization - external OFFICE gate vs. trusted internal path (Req 11)
 -----------------------------------------------------------------------
-- External/direct routes (both ``agent-compose`` and ``agent-recompose``) call
-  ``shared/auth.get_principal(event)`` then ``Principal.require_role(OFFICE)``. A non-OFFICE
-  subject (notably COMPANY) trying to trigger the agent DIRECTLY raises ``responses.ApiError``
-  (FORBIDDEN), returned as a proxy error at the handler boundary (Req 11.1, 11.2, 11.4).
-- The trusted internal invoke does NOT re-apply the OFFICE gate (Req 11.3): gap_event
-  already authenticated the gap registrant (COMPANY *or* OFFICE), and the emergency
-  recomposition is a continuation of that authenticated flow - so a COMPANY-registered
-  gap flows through to recomposition without a FORBIDDEN. Trust on this path is IAM, not
-  the role of the original registrant.
+- The external/direct ``agent-compose`` route calls ``shared/auth.get_principal(event)``
+  then ``Principal.require_role(OFFICE)``. A non-OFFICE subject trying to trigger the agent
+  DIRECTLY raises ``responses.ApiError`` (FORBIDDEN), returned as a proxy error at the
+  handler boundary (Req 11.1, 11.2, 11.4).
+- The trusted internal invoke does NOT apply the OFFICE gate (Req 11.3): gap_event already
+  authenticated the gap registrant (COMPANY *or* OFFICE), and the emergency recomposition
+  is a continuation of that authenticated flow - so a COMPANY-registered gap flows through
+  to recomposition without a FORBIDDEN. Trust on this path is IAM, not the role of the
+  original registrant.
 
 State guard - conditional writes, per-path branching (Req 6.6/6.7, design section 5)
 ------------------------------------------------------------------------------------
 - NORMAL: ``transition_request_status(REQUESTED -> COMPOSING)``. A failed conditional
   write (already COMPOSING/PROPOSED, or a concurrent duplicate) -> ``STATE_CONFLICT``;
   duplicates are naturally rejected, never queued.
-- EMERGENCY external/direct ``agent-recompose``: agent_invoke acquires the lock ITSELF.
-  A missing GapEvent -> ``GAP_EVENT_NOT_FOUND`` (Req 10.10); the expected state is
-  ``DETECTED`` and ``transition_gap_event_status(DETECTED -> RECOMPOSING)`` is performed
-  directly. A failed conditional transition -> ``STATE_CONFLICT`` (no queueing).
 - EMERGENCY trusted internal invoke: gap_event has ALREADY acquired
   ``DETECTED -> RECOMPOSING`` before invoking, so the GapEvent is already ``RECOMPOSING``.
-  This path ACCEPTS ``RECOMPOSING`` as the expected state - it does not re-acquire the
-  lock and never raises ``STATE_CONFLICT`` (this is what prevents the internal invoke from
-  dead-locking on gap_event's own lock).
+  This path does NOT acquire a lock and never raises ``STATE_CONFLICT`` (this is what
+  prevents the internal invoke from dead-locking on gap_event's own lock).
 
-EMERGENCY terminal-transition ownership - the lock owner owns the terminal transition
--------------------------------------------------------------------------------------
-- External/direct ``agent-recompose``: agent_invoke acquired the lock, so on save
-  success ``compose_flow`` performs the terminal ``RECOMPOSING -> PROPOSED`` transition.
-  (Retry-exhausted ``RECOMPOSING -> FAILED`` is task 6.3.)
-- Trusted internal invoke: gap_event owns the terminal transition (task 8.5); this
-  handler's internal path does NOT transition the GapEvent.
-- ``save_emergency_proposal`` never transitions the GapEvent on either path; the
-  external terminal transition lives in ``compose_flow`` orchestration, not the save fn.
-
-EMERGENCY payload-assembly responsibility (per path)
-----------------------------------------------------
-- External/direct ``agent-recompose``: the client body is NOT trusted. agent_invoke
-  looks the GapEvent up by ``eventId``, reads the affected Crew, assembles READY
-  candidates, and builds the EMERGENCY payload SERVER-SIDE, reusing task 8.1's
-  ``compute_fixed_members`` / ``compute_missing`` and task 8.4's ``build_emergency_payload``
-  (identical pure logic to gap_event - no divergence).
-- Trusted internal invoke: consumes gap_event's already-assembled payload as-is.
+EMERGENCY: NO Crew is created; gap_event owns the GapEvent (option-1 hand-off)
+-----------------------------------------------------------------------------
+Under the option-1 emergency hand-off, agent_invoke's EMERGENCY path composes + validates
+1..3 recommendations and RETURNS them, but does NOT persist anything itself: it saves no
+Crew, never touches the WorkRequest (it may be ``RUNNING``), and never transitions the
+GapEvent. The gap_event Lambda records the retained ``fixed_member_ids`` + the
+``recommendations`` onto the GapEvent item and owns the terminal transition
+(``RECOMPOSING -> PROPOSED`` / ``FAILED``); 담당자 A's emergency approval API then reads
+those and the OFFICE approves a ``replacement_member_ids`` set. Only the NORMAL path
+persists a Crew (via ``save_normal_proposal``).
 
 compose_flow (single attempt) + compose_flow_with_retry (orchestration, task 6.3)
 ---------------------------------------------------------------------------------
@@ -114,13 +102,12 @@ failure/timeout with fallback OFF maps to ``AGENT_RETRY_FAILED``.
 - **Retry (Req 9.1)**: a validation failure is discarded, an error log is recorded, and the
   Agent is retried EXACTLY ONCE — at most two compose attempts total. A Bedrock failure with
   fallback OFF is NOT retried (a down Bedrock is not worth retrying).
-- **Failure cleanup on exhaustion**: ``AGENT_RETRY_FAILED`` (Req 9.2) plus, per mode/path:
+- **Failure cleanup on exhaustion**: ``AGENT_RETRY_FAILED`` (Req 9.2) plus, per mode:
   NORMAL rolls the WorkRequest back ``COMPOSING -> REQUESTED`` (manual composition possible);
-  EMERGENCY external/direct ``agent-recompose`` (this Lambda holds the lock) transitions the
-  GapEvent ``RECOMPOSING -> FAILED`` + manual guidance (Req 10.9); EMERGENCY trusted internal
-  invoke does NOTHING — gap_event owns ``RECOMPOSING -> FAILED`` (task 8.5). EMERGENCY never
-  touches the WorkRequest (it may be RUNNING). The only failure-path state change is this
-  NON-PROPOSED cleanup, so Property 9 ("no save + no PROPOSED transition") still holds.
+  EMERGENCY does NOTHING — gap_event owns ``RECOMPOSING -> FAILED`` + manual guidance
+  (Req 10.9). EMERGENCY never touches the WorkRequest (it may be RUNNING) or the GapEvent.
+  The only failure-path state change is the NORMAL non-PROPOSED rollback, so Property 9
+  ("no save + no PROPOSED transition") still holds.
 
 The single attempt is kept a separate, public function so the Property 9 and freshest-
 snapshot tests can drive it directly and assert ``AGENT_OUTPUT_INVALID`` on a validation
@@ -159,11 +146,11 @@ flows through the identical validation + persistence path (the demo happy path, 
 
 Which recommendation is saved
 ------------------------------
-The Agent returns 1..3 ranked alternatives; the persistence contract
-(``save_*_proposal(recommendation, ctx)``) stores ONE. This handler persists the
-top-ranked recommendation (smallest ``rank``) as the actionable ``Crew(PROPOSED)`` and
-returns ALL recommendations in the response for the OFFICE to review. Selection among
-alternatives and approval are 담당자 A's scope.
+The Agent returns 1..3 ranked alternatives, and ALL are returned in the response for the
+OFFICE to review. For NORMAL, ``save_normal_proposal`` persists the top-ranked
+recommendation (smallest ``rank``) as the actionable ``Crew(PROPOSED)``. For EMERGENCY,
+nothing is saved here — gap_event records all recommendations onto the GapEvent. Selection
+among alternatives and approval are 담당자 A's scope.
 
 shared helper consumption
 -------------------------
@@ -182,7 +169,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from agent.crew_agent import BedrockUnavailable, compose
 from agent.schemas import AgentInput, AgentOutput, Recommendation
@@ -198,16 +185,9 @@ from backend.functions.agent_invoke.observability import (
 )
 from backend.functions.agent_invoke.persistence import (
     SaveContext,
-    save_emergency_proposal,
     save_normal_proposal,
 )
 from backend.functions.agent_invoke.validator import validate_output
-from backend.functions.gap_event.emergency_payload import build_emergency_payload
-from backend.functions.gap_event.gap_logic import (
-    Member,
-    compute_fixed_members,
-    compute_missing,
-)
 
 __all__ = [
     "handler",
@@ -247,16 +227,9 @@ _GAP_FAILED = "FAILED"  # GapStatus.FAILED (retry-exhausted terminal on the EXTE
 # Role required on the external API Gateway routes (Role.OFFICE).
 _ROLE_OFFICE = "OFFICE"
 
-# Defaults for coercing 담당자 A's (Decimal-bearing / lean) Crew-member records — mirror
-# the assembler's documented, non-safety-critical fallbacks. Fixed-member wages here are
-# only Agent hints; the validator uses the freshest get_workers snapshot for total_cost.
-_RUNNING = "RUNNING"
-_DEFAULT_TRADE = "GENERAL"
-_DEFAULT_WAGE = 1  # smallest positive wage (schema constrains > 0); malformed record only
-
-# Internal invoke path identifiers used by compose_flow's terminal-transition branch.
-_PATH_EXTERNAL = "external"  # API Gateway proxy event (NORMAL or external agent-recompose)
-_PATH_INTERNAL = "internal"  # gap_event's trusted internal invoke
+# Path identifiers threaded through compose_flow for call-site symmetry.
+_PATH_EXTERNAL = "external"  # API Gateway proxy event (NORMAL agent-compose)
+_PATH_INTERNAL = "internal"  # gap_event's trusted internal invoke (EMERGENCY)
 
 # --------------------------------------------------------------------------- #
 # Error codes — fixed by the shared contract (PRD_A_BACKEND.md 1.6 / design.md #
@@ -319,16 +292,6 @@ class _FlowError(Exception):
 
 
 # --------------------------------------------------------------------------- #
-# Coercion helpers (담당자 A record shapes -> strict schemas)                    #
-# --------------------------------------------------------------------------- #
-def _as_int(value: Any, default: int) -> int:
-    """Coerce a possibly-``Decimal`` / ``None`` numeric to ``int`` (``None`` -> default)."""
-    if value is None:
-        return default
-    return int(value)
-
-
-# --------------------------------------------------------------------------- #
 # Bedrock fallback flag resolution (Req 9.3)                                   #
 # --------------------------------------------------------------------------- #
 def fallback_enabled_default() -> bool:
@@ -379,11 +342,13 @@ def _is_internal_invoke(event: Any) -> bool:
 
 
 def _classify_api_event(event: Dict[str, Any]) -> str:
-    """Classify an API Gateway proxy event as NORMAL or EMERGENCY by resource / params."""
+    """Classify an API Gateway proxy event; only NORMAL ``agent-compose`` is a valid route.
+
+    EMERGENCY is driven exclusively by gap_event's trusted internal invoke (there is no
+    external ``agent-recompose`` route), so any other/unrecognized API route raises.
+    """
     resource = str(event.get("resource") or event.get("path") or "")
     path_params = event.get("pathParameters") or {}
-    if "agent-recompose" in resource or "eventId" in path_params:
-        return _MODE_EMERGENCY
     if "agent-compose" in resource or "requestId" in path_params:
         return _MODE_NORMAL
     raise ValueError(f"unrecognized agent_invoke route: resource={resource!r}")
@@ -415,112 +380,6 @@ def _require_office(event: Any) -> "Principal":
     principal = auth.get_principal(event)
     principal.require_role(_ROLE_OFFICE)
     return principal
-
-
-# --------------------------------------------------------------------------- #
-# EMERGENCY external server-side payload assembly (reuses 8.1 + 8.4 + 5.1)      #
-# --------------------------------------------------------------------------- #
-def _to_member(raw: Dict[str, Any]) -> Optional[Member]:
-    """Coerce a Crew-member record to a :class:`Member`, or ``None`` when unusable.
-
-    ``worker_id`` is required (a member without an id cannot be retained or excluded);
-    such entries are skipped. Other fields fall back to documented defaults. The wage is
-    only an Agent hint here — the validator recomputes ``total_cost`` from the freshest
-    ``get_workers`` snapshot — so a defaulted wage cannot make an invalid output pass.
-    """
-    worker_id = raw.get("worker_id")
-    if not worker_id:
-        return None
-    return Member(
-        worker_id=worker_id,
-        trade=(raw.get("trade") or _DEFAULT_TRADE),
-        desired_daily_wage=_as_int(raw.get("desired_daily_wage"), _DEFAULT_WAGE),
-        state=(raw.get("state") or _RUNNING),
-    )
-
-
-def _extract_active_members(crew: Dict[str, Any]) -> List[Member]:
-    """Extract active crew members (``active_members`` preferred, then ``members``)."""
-    raw_members = crew.get("active_members")
-    if raw_members is None:
-        raw_members = crew.get("members") or []
-    members = [_to_member(m) for m in raw_members]
-    return [m for m in members if m is not None]
-
-
-def _extract_departed_ids(gap: Dict[str, Any]) -> List[str]:
-    """Extract the departed-worker ids from the GapEvent (tolerant of key naming).
-
-    The real GapEvent schema stores the departed workers under ``missing_worker_ids``; the
-    legacy/alternate keys are kept as defensive fallbacks so either shape is accepted.
-    """
-    for key in ("missing_worker_ids", "departed_ids", "departed_worker_ids", "departed"):
-        value = gap.get(key)
-        if value:
-            return list(value)
-    return []
-
-
-def _assemble_emergency_input(
-    gap: Dict[str, Any], office_id_hint: Optional[str]
-) -> Tuple[AgentInput, str]:
-    """Assemble the EMERGENCY ``AgentInput`` SERVER-SIDE from the GapEvent (external route).
-
-    The client body is not trusted (design decision, tasks.md Notes). Reads the affected
-    Crew, derives the retained team and the shortage, and reuses the shared pure logic so
-    this route stays byte-for-byte consistent with gap_event's internal assembly:
-
-    1. ``get_crew(gap.crew_id)`` -> the affected crew (``None`` -> ``CREW_INVALID``).
-    2. ``compute_fixed_members(active_members, departed_ids)`` (task 8.1) -> retained team.
-    3. ``assemble_normal_input(request_id, office_id)`` (task 5.1) -> the FULL
-       :class:`RequestSpec` (with the full required trade/headcount), the office-scoped
-       READY candidate pool, and the collaboration pairs — reusing all of 5.1's record
-       coercion instead of duplicating it.
-    4. ``compute_missing(required, fixed_members)`` (task 8.1) -> per-trade shortage, used
-       to narrow the candidate pool to the trades that actually need new hires (fully
-       covered trades need none).
-    5. ``build_emergency_payload(request, fixed_members, candidates, collaboration_pairs)``
-       (task 8.4) -> the ``mode=EMERGENCY`` payload.
-
-    Returns ``(agent_input, crew_id)``; ``crew_id`` becomes the SaveContext
-    ``current_crew_id`` (the re-composition target the validator's conflict check exempts).
-    """
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
-
-    crew_id = gap.get("crew_id")
-    crew = db.get_crew(crew_id) if crew_id else None
-    if crew is None:
-        # Primarily gap_event's error (Req 10.11); reused defensively on the external route
-        # since a payload cannot be assembled from a missing/invalid crew.
-        raise _FlowError(_ERR_CREW_INVALID, f"affected crew not found: {crew_id!r}")
-
-    request_id = crew.get("request_id") or gap.get("request_id")
-    if not request_id:
-        raise _FlowError(_ERR_CREW_INVALID, f"crew {crew_id!r} has no linked request_id")
-
-    office_id = office_id_hint or crew.get("office_id") or gap.get("office_id")
-    active_members = _extract_active_members(crew)
-    departed_ids = _extract_departed_ids(gap)
-    fixed_members = compute_fixed_members(active_members, departed_ids)
-
-    try:
-        normal_like = assemble_normal_input(request_id, office_id)
-    except ValueError as exc:  # linked work request missing/unreadable
-        raise _FlowError(
-            _ERR_CREW_INVALID, f"work request for crew {crew_id!r} unavailable: {exc}"
-        ) from exc
-
-    request = normal_like.request
-    missing = compute_missing(request.required_workers, fixed_members)
-    missing_trades = {tr.trade for tr in missing}
-    # Only source new hires for trades with a positive shortage; trades fully covered by
-    # fixed members need none (and their candidates would just be unused options).
-    candidates = [c for c in normal_like.candidates if c.trade in missing_trades]
-
-    agent_input = build_emergency_payload(
-        request, fixed_members, candidates, normal_like.collaboration_pairs
-    )
-    return agent_input, crew_id
 
 
 # --------------------------------------------------------------------------- #
@@ -580,36 +439,32 @@ def _collect_member_ids(output: AgentOutput) -> List[str]:
 
 
 def _select_recommendation(output: AgentOutput) -> Recommendation:
-    """Pick the top-ranked recommendation (smallest ``rank``) to persist as the Crew."""
+    """Pick the top-ranked recommendation (smallest ``rank``) to persist as the NORMAL Crew."""
     return min(output.recommendations, key=lambda rec: rec.rank)
 
 
 def _persist_and_finalize(
     output: AgentOutput, save_ctx: SaveContext, *, path: str, event_id: Optional[str]
-) -> str:
-    """Persist the chosen recommendation and perform the path-owned terminal transition.
+) -> Optional[str]:
+    """Persist the result per mode and return the Crew id (``None`` for EMERGENCY).
 
     - NORMAL: ``save_normal_proposal`` saves the Crew AND transitions the WorkRequest
-      ``COMPOSING -> PROPOSED`` (Req 8.1, 8.2).
-    - EMERGENCY: ``save_emergency_proposal`` saves the Crew ONLY (no WorkRequest change).
-      The GapEvent terminal transition is owned by the LOCK holder:
-        * external/direct ``agent-recompose`` (this Lambda holds the lock) ->
-          ``RECOMPOSING -> PROPOSED`` here in the orchestration (Req 10.7 mirror for the
-          external route);
-        * trusted internal invoke -> gap_event owns it (task 8.5); do nothing here.
+      ``COMPOSING -> PROPOSED`` (Req 8.1, 8.2). Returns the crew id.
+    - EMERGENCY (option-1 hand-off): NOTHING is persisted here — no Crew, no WorkRequest
+      change, no GapEvent transition. The validated recommendations are returned to the
+      gap_event Lambda, which records them onto the GapEvent (``fixed_member_ids`` +
+      ``recommendations``) and owns the terminal ``RECOMPOSING -> PROPOSED`` / ``FAILED``
+      transition. Returns ``None``.
+
+    ``path`` / ``event_id`` are retained on the signature for call-site symmetry but are no
+    longer used to drive an EMERGENCY terminal transition (agent_invoke never transitions
+    the GapEvent).
     """
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
-
-    recommendation = _select_recommendation(output)
     if save_ctx.mode == _MODE_NORMAL:
+        recommendation = _select_recommendation(output)
         return save_normal_proposal(recommendation, save_ctx)
-
-    crew_id = save_emergency_proposal(recommendation, save_ctx)
-    if path == _PATH_EXTERNAL:
-        # Lock owner (agent_invoke) owns the terminal transition on the external route.
-        db.transition_gap_event_status(event_id, _GAP_RECOMPOSING, _GAP_PROPOSED)
-    # Trusted internal invoke: gap_event owns the terminal transition -> intentionally none.
-    return crew_id
+    # EMERGENCY: gap_event persists the recommendations + owns the terminal transition.
+    return None
 
 
 def compose_flow(
@@ -726,25 +581,31 @@ def compose_flow(
     if not result.valid:
         # Single-attempt contract (upholds Property 9): NO save, NO state change — just
         # AGENT_OUTPUT_INVALID. compose_flow_with_retry catches this to run the one retry and,
-        # if that also fails, the NORMAL rollback / EMERGENCY-external RECOMPOSING -> FAILED.
+        # if that also fails, the NORMAL COMPOSING -> REQUESTED rollback (EMERGENCY does no
+        # cleanup here — gap_event owns RECOMPOSING -> FAILED).
         raise _FlowError(
             _ERR_AGENT_OUTPUT_INVALID,
             "agent output failed validation: " + ", ".join(result.failed_checks()),
         )
 
-    # ---- Persist (mode-split) + terminal transition (path-owned) ------------------ #
+    # ---- Persist (NORMAL only) ---------------------------------------------------- #
+    # NORMAL saves a Crew(PROPOSED) + transitions the WorkRequest; EMERGENCY persists nothing
+    # here (crew_id stays None) — gap_event records the recommendations onto the GapEvent.
     crew_id = _persist_and_finalize(output, save_ctx, path=path, event_id=event_id)
     if telemetry is not None:
-        # Final save result for the execution record (saved + crew id; not PII).
+        # The attempt produced a validated, finalized result. ``saved`` is True on both modes
+        # (the compose succeeded); ``crew_id`` is the NORMAL Crew id, or None for EMERGENCY
+        # (no Crew is created — the recommendations are the deliverable).
         telemetry.saved = True
         telemetry.crew_id = crew_id
 
     data: Dict[str, Any] = {
         "mode": output.mode,
         "request_id": output.request_id,
-        "crew_id": crew_id,
         "recommendations": [rec.model_dump() for rec in output.recommendations],
     }
+    if crew_id is not None:
+        data["crew_id"] = crew_id  # NORMAL only; EMERGENCY returns no Crew id
     if save_ctx.gap_event_id is not None:
         data["gap_event_id"] = save_ctx.gap_event_id
     return responses.success(data)
@@ -756,7 +617,7 @@ def compose_flow(
 def _apply_failure_cleanup(
     save_ctx: SaveContext, *, path: str, event_id: Optional[str]
 ) -> None:
-    """Perform the per-path, per-mode failure cleanup when the retry budget is exhausted.
+    """Perform the per-mode failure cleanup when the retry budget is exhausted.
 
     This is the ONLY state change on the failure path, and it is deliberately NOT a PROPOSED
     transition (so it never conflicts with Property 9's "no save + no PROPOSED"):
@@ -764,44 +625,33 @@ def _apply_failure_cleanup(
     - **NORMAL** -> rollback ``transition_request_status(COMPOSING -> REQUESTED)`` so manual
       composition becomes possible again (Req 9.2). This is the ``COMPOSING -> REQUESTED``
       rollback that task 6.4 asserts happens exactly once.
-    - **EMERGENCY, external/direct ``agent-recompose``** -> the lock holder (this Lambda) owns
-      the terminal transition, so it transitions ``RECOMPOSING -> FAILED`` (Req 10.9). The
-      manual-composition guidance rides in the AGENT_RETRY_FAILED message (see
-      :func:`_retry_failed_message`). The WorkRequest is NEVER touched (it may be RUNNING).
-    - **EMERGENCY, trusted internal invoke** -> do NOTHING. gap_event owns the terminal
-      ``RECOMPOSING -> FAILED`` transition + guidance (task 8.5); this path must not transition
-      the GapEvent. gap_event sees the AGENT_RETRY_FAILED response and performs its own FAILED
+    - **EMERGENCY** -> do NOTHING. EMERGENCY runs only on the trusted internal invoke path;
+      gap_event owns the terminal ``RECOMPOSING -> FAILED`` transition + manual guidance
+      (Req 10.9) and never lets agent_invoke touch the GapEvent or the WorkRequest (it may be
+      RUNNING). gap_event sees the AGENT_RETRY_FAILED response and performs its own FAILED
       transition.
+
+    ``path`` / ``event_id`` are unused for EMERGENCY now (retained on the signature for
+    call-site symmetry).
     """
     from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
 
     if save_ctx.mode == _MODE_NORMAL:
         # NORMAL rollback so the office can compose manually (Req 9.2).
         db.transition_request_status(save_ctx.request_id, _REQ_COMPOSING, _REQ_REQUESTED)
-        return
-
-    # EMERGENCY: never rewind/alter the WorkRequest (it may be RUNNING). Only the EXTERNAL
-    # route — where agent_invoke holds the lock — owns the GapEvent FAILED transition.
-    if path == _PATH_EXTERNAL:
-        db.transition_gap_event_status(event_id, _GAP_RECOMPOSING, _GAP_FAILED)
-    # Trusted internal invoke: intentionally no transition — gap_event owns FAILED (task 8.5).
+    # EMERGENCY: intentionally no transition — gap_event owns RECOMPOSING -> FAILED (Req 10.9).
 
 
 def _retry_failed_message(save_ctx: SaveContext, path: str) -> str:
-    """Build the AGENT_RETRY_FAILED message, including manual-composition guidance per path."""
+    """Build the AGENT_RETRY_FAILED message, including manual-composition guidance per mode."""
     if save_ctx.mode == _MODE_NORMAL:
         # Rolled back to REQUESTED; the front-end falls back to manual composition.
         return (
             "Agent가 재시도 후에도 유효한 편성을 생성하지 못했습니다. "
             "요청을 수동 편성 가능 상태로 되돌렸습니다."
         )
-    if path == _PATH_EXTERNAL:
-        # External agent-recompose owns the FAILED transition + guidance (Req 10.9).
-        return (
-            "긴급 재편성이 재시도 후에도 실패했습니다. 재편성 이벤트를 FAILED로 표시했습니다. "
-            "수동 편성이 필요합니다."
-        )
-    # Trusted internal invoke: gap_event will mark FAILED and attach its own guidance.
+    # EMERGENCY (trusted internal invoke): gap_event will mark the GapEvent FAILED and attach
+    # its own manual-composition guidance.
     return "Agent가 재시도 후에도 유효한 재편성을 생성하지 못했습니다."
 
 
@@ -971,47 +821,6 @@ def _handle_normal(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
     return compose_flow_with_retry(agent_input, save_ctx, path=_PATH_EXTERNAL)
 
 
-def _handle_emergency_external(event: Dict[str, Any], event_id: str) -> Dict[str, Any]:
-    """EMERGENCY external ``agent-recompose``: OFFICE gate -> not-found -> self-lock ->
-    server-side payload assembly -> compose_flow (which owns the terminal transition)."""
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
-
-    principal = _require_office(event)  # FORBIDDEN if not OFFICE (Req 11.1, 11.2, 11.4)
-
-    # 1. GapEvent existence (Req 10.10). Looked up BEFORE the lock so a genuine miss is
-    #    reported distinctly from a state conflict.
-    gap = db.get_gap_event(event_id)
-    if gap is None:
-        raise _FlowError(_ERR_GAP_EVENT_NOT_FOUND, f"gap event not found: {event_id!r}")
-
-    # 2. Self-acquire the lock: DETECTED -> RECOMPOSING (Req 6.6/6.7). Failure (already
-    #    RECOMPOSING/PROPOSED/FAILED, or a concurrent duplicate recompose) -> conflict.
-    if not db.transition_gap_event_status(event_id, _GAP_DETECTED, _GAP_RECOMPOSING):
-        raise _FlowError(
-            _ERR_STATE_CONFLICT,
-            f"gap event {event_id!r} not in {_GAP_DETECTED} (already recomposing?)",
-        )
-
-    # 3. Server-side EMERGENCY payload assembly (do NOT trust the client body).
-    office_id = principal.office_id
-    agent_input, crew_id = _assemble_emergency_input(gap, office_id)
-
-    save_ctx = SaveContext(
-        mode=_MODE_EMERGENCY,
-        request_id=agent_input.request.request_id,
-        office_id=office_id,
-        current_crew_id=crew_id,
-        gap_event_id=event_id,
-    )
-    # External route: the lock owner (this Lambda) owns BOTH terminal transitions — on save
-    # success compose_flow performs RECOMPOSING -> PROPOSED, and on retry-exhausted failure the
-    # wrapper performs RECOMPOSING -> FAILED + manual guidance (Req 10.9). gap_event is not
-    # involved on this path.
-    return compose_flow_with_retry(
-        agent_input, save_ctx, path=_PATH_EXTERNAL, event_id=event_id
-    )
-
-
 def _handle_internal(event: Dict[str, Any]) -> Dict[str, Any]:
     """EMERGENCY trusted internal invoke: consume gap_event's payload; no OFFICE re-gate.
 
@@ -1054,11 +863,12 @@ def handler(event: Any, context: Any = None) -> Dict[str, Any]:
     """agent_invoke Lambda entry point: route by event shape, then dispatch.
 
     Routing (see module docstring): a trusted internal invoke (plain dict + marker) ->
-    EMERGENCY internal path; otherwise an API Gateway proxy event -> NORMAL
-    (``agent-compose``) or EMERGENCY external (``agent-recompose``). Every mapped failure
-    is raised internally as a ``_FlowError`` (the internal flow codes) or, from the auth
-    gate, as 담당자 A's ``responses.ApiError`` (UNAUTHORIZED / FORBIDDEN); both are converted
-    here to a single proxy error response. Success paths return ``responses.success(...)``.
+    EMERGENCY internal path (gap_event's EventBridge-driven recomposition); otherwise an API
+    Gateway proxy event -> NORMAL (``agent-compose``). There is no external EMERGENCY route.
+    Every mapped failure is raised internally as a ``_FlowError`` (the internal flow codes)
+    or, from the auth gate, as 담당자 A's ``responses.ApiError`` (UNAUTHORIZED / FORBIDDEN);
+    both are converted here to a single proxy error response. Success paths return
+    ``responses.success(...)``.
     """
     from backend.shared import responses  # lazy: real Layer in prod
     from backend.shared.responses import ApiError
@@ -1066,10 +876,10 @@ def handler(event: Any, context: Any = None) -> Dict[str, Any]:
     try:
         if _is_internal_invoke(event):
             return _handle_internal(event)
-        route = _classify_api_event(event)
-        if route == _MODE_NORMAL:
-            return _handle_normal(event, _path_param(event, "requestId"))
-        return _handle_emergency_external(event, _path_param(event, "eventId"))
+        # The only external API route is NORMAL agent-compose (_classify_api_event raises on
+        # any unrecognized route).
+        _classify_api_event(event)
+        return _handle_normal(event, _path_param(event, "requestId"))
     except _FlowError as exc:
         return responses.error(exc.code, exc.message)
     except ApiError as exc:

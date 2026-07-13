@@ -255,3 +255,49 @@ def test_adapter_save_gap_event_and_transition_on_real_table(real_table):
     assert sg.transition_gap_event_status(event_id, GapStatus.DETECTED, GapStatus.RECOMPOSING) is True
     assert sg.transition_gap_event_status(event_id, GapStatus.DETECTED, GapStatus.PROPOSED) is False
     assert shared_db.get_item(shared_db.gap_pk(event_id), "META")["status"] == GapStatus.RECOMPOSING
+
+
+def test_adapter_record_gap_recommendations_on_real_table(real_table):
+    """record_gap_recommendations: option-1 EMERGENCY hand-off writes fixed_member_ids +
+    recommendations AND transitions RECOMPOSING→PROPOSED in one conditional write."""
+    event_id = sg.save_gap_event(
+        office_id=OFFICE_ID,
+        crew_id="CREW-R1",
+        request_id="REQ-R1",
+        gap_type=GapType.NO_SHOW,
+        missing_worker_ids=["C"],
+    )
+    # gap_event pre-locks DETECTED → RECOMPOSING before the agent runs.
+    assert sg.transition_gap_event_status(event_id, GapStatus.DETECTED, GapStatus.RECOMPOSING) is True
+
+    recommendations = [
+        {"replacement_member_ids": ["E"], "total_cost": 158_000, "reason": "결원 보충"},
+    ]
+    # From RECOMPOSING: record the recommendations + transition to PROPOSED (succeeds once).
+    assert sg.record_gap_recommendations(
+        event_id,
+        fixed_member_ids=["A", "B"],
+        recommendations=recommendations,
+        expected=GapStatus.RECOMPOSING,
+        target=GapStatus.PROPOSED,
+    ) is True
+
+    item = shared_db.get_item(shared_db.gap_pk(event_id), "META")
+    assert item["status"] == GapStatus.PROPOSED
+    assert item["fixed_member_ids"] == ["A", "B"]
+    assert item["recommendations"][0]["replacement_member_ids"] == ["E"]
+    assert int(item["recommendations"][0]["total_cost"]) == 158_000
+    assert item["GSI1SK"] == shared_db.gap_gsi1sk(GapStatus.PROPOSED, event_id)
+
+    # A stale expected (still RECOMPOSING, but it's now PROPOSED) → conditional check fails,
+    # returns False, and neither the status nor the recommendations are mutated.
+    assert sg.record_gap_recommendations(
+        event_id,
+        fixed_member_ids=["X"],
+        recommendations=[{"replacement_member_ids": ["Z"], "total_cost": 1, "reason": "stale"}],
+        expected=GapStatus.RECOMPOSING,
+        target=GapStatus.FAILED,
+    ) is False
+    item_after = shared_db.get_item(shared_db.gap_pk(event_id), "META")
+    assert item_after["status"] == GapStatus.PROPOSED
+    assert item_after["fixed_member_ids"] == ["A", "B"]

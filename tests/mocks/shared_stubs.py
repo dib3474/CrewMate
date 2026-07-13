@@ -436,6 +436,43 @@ class FakeSharedDB:
             event["status"] = target
         return succeeded
 
+    def record_gap_recommendations(
+        self,
+        event_id: str,
+        *,
+        fixed_member_ids: Optional[Iterable[str]] = None,
+        recommendations: Optional[List[dict]] = None,
+        expected: Optional[str] = None,
+        target: Optional[str] = None,
+    ) -> bool:
+        """Conditional transition + EMERGENCY recommendation write (mirrors ``shared_gateway``).
+
+        Option-1 emergency hand-off: on a successful ``expected → target`` conditional
+        transition, also stamp ``fixed_member_ids`` + ``recommendations`` onto the GapEvent
+        item. Recorded into ``gap_status_transitions`` (like a plain transition) so
+        transition-sequence assertions still see the ``RECOMPOSING → PROPOSED`` step, and the
+        written fields land on ``gap_events[event_id]`` for direct assertions. A failed
+        conditional write leaves both status and recommendations untouched.
+        """
+        event = self.gap_events.get(event_id)
+        succeeded = event is not None and event.get("status") == expected
+        record = {
+            "method": "record_gap_recommendations",
+            "event_id": event_id,
+            "expected": expected,
+            "target": target,
+            "ok": succeeded,
+            "fixed_member_ids": list(fixed_member_ids or []),
+            "recommendations": list(recommendations or []),
+        }
+        self.calls.append(record)
+        self.gap_status_transitions.append(record)
+        if succeeded:
+            event["status"] = target
+            event["fixed_member_ids"] = list(fixed_member_ids or [])
+            event["recommendations"] = list(recommendations or [])
+        return succeeded
+
     # --- assertion conveniences -------------------------------------------- #
     def method_calls(self, name: str) -> List[dict]:
         """All recorded calls to ``name`` (handy for side-effect assertions)."""
@@ -479,6 +516,7 @@ _DB_CONTRACT_METHODS = (
     "transition_request_status",
     "save_gap_event",
     "transition_gap_event_status",
+    "record_gap_recommendations",
 )
 
 

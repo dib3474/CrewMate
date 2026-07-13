@@ -331,6 +331,32 @@ def _parse_agent_response(agent_resp: Any) -> Dict[str, Any]:
     return {}
 
 
+def _to_replacement_recommendations(
+    recommendations: List[Dict[str, Any]], fixed_member_ids: List[str]
+) -> List[Dict[str, Any]]:
+    """Reshape agent_invoke's recommendations into the GapEvent's option-1 storage form.
+
+    agent_invoke returns each recommendation with the FULL ``member_ids`` (retained
+    ``fixed_members`` + new hires). Under the option-1 hand-off the GapEvent stores, per
+    recommendation, only ``{replacement_member_ids, total_cost, reason}`` where
+    ``replacement_member_ids`` is the NEW hires alone (``member_ids`` minus the retained
+    ``fixed_member_ids``) — the exact set 담당자 A's ``approve_emergency`` needs to assign.
+    Order within each recommendation is preserved.
+    """
+    fixed_set = set(fixed_member_ids)
+    reshaped: List[Dict[str, Any]] = []
+    for rec in recommendations:
+        member_ids = rec.get("member_ids") or []
+        reshaped.append(
+            {
+                "replacement_member_ids": [m for m in member_ids if m not in fixed_set],
+                "total_cost": rec.get("total_cost"),
+                "reason": rec.get("reason", ""),
+            }
+        )
+    return reshaped
+
+
 def _build_internal_payload(
     agent_input: AgentInput,
     event_id: Optional[str],
@@ -510,27 +536,47 @@ def handler(event: Any, context: Any = None) -> Dict[str, Any]:
     success = payload_body.get("success") is True
     agent_data = payload_body.get("data") or {}
 
-    # 6b. Emit gap_event's OWN structured execution record — ONCE per gap handling, from
+    # 6b. Option-1 hand-off reshape: EMERGENCY creates NO Crew. Compute the retained team ids
+    #     and reshape the Agent's recommendations to {replacement_member_ids, total_cost,
+    #     reason} for storage on the GapEvent (담당자 A's approve_emergency reads these).
+    fixed_member_ids = [f.worker_id for f in fixed_members]
+    persisted_recommendations = (
+        _to_replacement_recommendations(
+            agent_data.get("recommendations", []), fixed_member_ids
+        )
+        if success
+        else []
+    )
+
+    # 6c. Emit gap_event's OWN structured execution record — ONCE per gap handling, from
     #     gap_event's vantage point (agent_invoke logged the compose execution separately).
     #     Never touches the DB, so it does not affect the transition order.
     _log_gap_execution(
         agent_input,
         event_id=event_id,
         success=success,
-        recommendations=agent_data.get("recommendations", []) if success else [],
-        crew_id=agent_data.get("crew_id") if success else None,
+        recommendations=persisted_recommendations,
+        crew_id=None,  # option-1: EMERGENCY creates no Crew
     )
 
     # 7. Own the terminal transition on this internal path (agent_invoke does not touch the
-    #    GapEvent here). Remaining team members keep RUNNING — no worker-state change.
+    #    GapEvent). On success, record fixed_member_ids + recommendations onto the GapEvent
+    #    AND transition RECOMPOSING → PROPOSED in ONE conditional write. Remaining team
+    #    members keep RUNNING — no worker-state change.
     if success:
-        db.transition_gap_event_status(event_id, _GAP_RECOMPOSING, _GAP_PROPOSED)
+        db.record_gap_recommendations(
+            event_id,
+            fixed_member_ids=fixed_member_ids,
+            recommendations=persisted_recommendations,
+            expected=_GAP_RECOMPOSING,
+            target=_GAP_PROPOSED,
+        )
         return {
             "event_id": event_id,
             "gap_status": _GAP_PROPOSED,
             "mode": _MODE_EMERGENCY,
-            "crew_id": agent_data.get("crew_id"),
-            "recommendations": agent_data.get("recommendations", []),
+            "fixed_member_ids": fixed_member_ids,
+            "recommendations": persisted_recommendations,
         }
 
     # Recomposition failed (retry exhausted): FAILED + manual-composition guidance (Req 10.9).
