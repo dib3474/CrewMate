@@ -12,7 +12,8 @@ What is REAL here
 - ``backend.shared.schemas`` item builders + ``backend.shared.state`` enums.
 - The ``shared_gateway`` adapter and the agent_invoke handler → assembler → validator →
   persistence chain.
-- ``backend.shared.auth`` (claim-bearing event) and ``backend.shared.responses`` (proxy).
+- ``backend.shared.responses`` (the proxy envelope the handler returns). NORMAL is triggered
+  by a ``ComposeRequested`` EventBridge event (no Cognito principal).
 
 Only Bedrock is mocked (``compose`` monkeypatched to a deterministic fake).
 
@@ -99,17 +100,12 @@ def _fake_compose(agent_input, *, timeout_s=None, agent=None):
     return _valid_output_for(agent_input)
 
 
-def _agent_compose_event(request_id, *, role="OFFICE", office_id=OFFICE_ID):
-    """API-Gateway proxy event for ``POST /office/requests/{requestId}/agent-compose``."""
+def _agent_compose_event(request_id, *, office_id=OFFICE_ID):
+    """EventBridge ``ComposeRequested`` event (the NORMAL trigger consumed by agent_invoke)."""
     return {
-        "resource": "/office/requests/{requestId}/agent-compose",
-        "httpMethod": "POST",
-        "requestContext": {
-            "requestId": "apigw-moto",
-            "authorizer": {"claims": {"sub": "u1", "custom:role": role,
-                                      "custom:office_id": office_id}},
-        },
-        "pathParameters": {"requestId": request_id},
+        "source": "crewmate.office",
+        "detail-type": "ComposeRequested",
+        "detail": {"request_id": request_id, "office_id": office_id},
     }
 
 
@@ -159,8 +155,8 @@ def _seed_requested_request(request_id, *, office_id=OFFICE_ID):
 # Full NORMAL flow against the REAL single table                               #
 # =========================================================================== #
 def test_normal_flow_writes_crew_and_transitions_request_on_real_table(real_table, monkeypatch):
-    """agent-compose end-to-end against moto: a Crew(PROPOSED, AGENT) is written and the
-    WorkRequest moves REQUESTED→COMPOSING→PROPOSED — read back from the REAL table."""
+    """NORMAL ComposeRequested end-to-end against moto: a Crew(PROPOSED, AGENT) is written and
+    the WorkRequest moves REQUESTED→COMPOSING→PROPOSED — read back from the REAL table."""
     _seed_requested_request("REQ-M1")
     _seed_ready_worker("MW1", wage=150_000)
     _seed_ready_worker("MW2", wage=160_000)

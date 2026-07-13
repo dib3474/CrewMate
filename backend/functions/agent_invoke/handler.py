@@ -16,25 +16,44 @@ Design references
 
 Two entry paths, distinguished by EVENT SHAPE (not a trusted payload flag)
 --------------------------------------------------------------------------
-1. ``POST /office/requests/{requestId}/agent-compose``  -> NORMAL  (external/direct,
-   via API Gateway proxy event).
-2. gap_event Lambda's **trusted internal invoke** -> EMERGENCY, consuming a
-   pre-assembled payload (a plain invoke dict, NOT an API Gateway event).
+1. EventBridge ``ComposeRequested`` event -> NORMAL. agent_invoke is a DIRECT EventBridge
+   consumer (there is no external ``agent-compose`` API route — decision 3/5): an OFFICE-
+   authenticated 담당자 A route publishes ``ComposeRequested`` when a request is ready to be
+   composed, and this Lambda is the target.
+2. gap_event Lambda's **trusted internal invoke** -> EMERGENCY, consuming a pre-assembled
+   payload (a plain invoke dict carrying the ``internal_invoke`` marker).
 
-EMERGENCY is driven EXCLUSIVELY by the gap_event Lambda's EventBridge → trusted internal
-invoke path; there is no external ``agent-recompose`` API route (the direct EMERGENCY
-route was removed — decision 5). ``_is_internal_invoke`` routes by the event's *shape*: an
-API Gateway proxy event carries ``requestContext`` / ``httpMethod`` / ``resource`` /
-``pathParameters``, whereas gap_event's internal invoke is a plain dict carrying the
-EMERGENCY payload plus an explicit ``internal_invoke`` marker and ``event_id``.
+Both triggers are plain (non-API-Gateway) dict events; there is NO API Gateway proxy path
+and NO Cognito principal on either (an EventBridge invocation / a Lambda-to-Lambda invoke
+carries none). ``_is_internal_invoke`` routes by the ``internal_invoke`` marker; anything
+else is treated as a ``ComposeRequested`` EventBridge event (NORMAL).
 
-    IMPORTANT - the real trust boundary is IAM, not the payload marker. The
-    ``internal_invoke`` key is only a *routing hint*: a payload flag is spoofable, so it
-    can never be the security control. Access is enforced two ways: the API Gateway
-    ``agent-compose`` route requires the OFFICE role (below), and the internal invoke is
-    locked down by IAM so that ONLY gap_event's Lambda execution role may invoke
-    agent_invoke directly. That IAM policy is 담당자 A's infrastructure scope; this handler
-    documents and relies on it.
+    IMPORTANT - the trust boundary is INFRASTRUCTURE, not a payload flag. For NORMAL, the
+    OFFICE-only execution rule (Req 11) is enforced at the PUBLISHER: only an OFFICE-
+    authenticated 담당자 A route may publish ``ComposeRequested`` (agent_invoke is not a
+    public route, so a non-OFFICE subject cannot reach it directly). For EMERGENCY, the
+    ``internal_invoke`` marker is only a routing hint — IAM locks the direct invoke down so
+    ONLY gap_event's execution role may call agent_invoke. Both policies are 담당자 A's
+    infrastructure scope; this handler documents and relies on them.
+
+NORMAL EventBridge contract (defined here; 담당자 A's publisher MUST match it)
+----------------------------------------------------------------------------
+An OFFICE-authenticated 담당자 A route (office_core) publishes, when a WorkRequest is ready
+for AI composition::
+
+    {
+        "Source": "crewmate.office",
+        "DetailType": "ComposeRequested",
+        "Detail": { "request_id": "<WorkRequest id>", "office_id": "<office id>" }
+    }
+
+This handler reads ``event["detail"]`` (a dict, or a JSON string on some delivery shapes;
+a bare detail dict carrying the fields at top level is also accepted for direct invoke /
+tests). ``request_id`` is REQUIRED; ``office_id`` is optional (it falls back to the
+WorkRequest's own ``office_id`` via ``get_work_request``). Mirrors the ``GapEventDetected``
+consumer shape in ``gap_event/handler.py``. 담당자 A currently publishes only
+``GapEventDetected``; adding this ``ComposeRequested`` publish is the coordination item for
+NORMAL (see the team notes).
 
 Internal-invoke payload contract (defined here; gap_event MUST match it)
 ------------------------------------------------------------------------
@@ -54,17 +73,14 @@ gap_event invokes agent_invoke synchronously with a JSON-serializable dict::
 :meth:`AgentInput.model_validate`. The ``mode`` / ``event_id`` / ``office_id`` /
 ``current_crew_id`` keys carry routing + linkage metadata.
 
-Authorization - external OFFICE gate vs. trusted internal path (Req 11)
------------------------------------------------------------------------
-- The external/direct ``agent-compose`` route calls ``shared/auth.get_principal(event)``
-  then ``Principal.require_role(OFFICE)``. A non-OFFICE subject trying to trigger the agent
-  DIRECTLY raises ``responses.ApiError`` (FORBIDDEN), returned as a proxy error at the
-  handler boundary (Req 11.1, 11.2, 11.4).
-- The trusted internal invoke does NOT apply the OFFICE gate (Req 11.3): gap_event already
-  authenticated the gap registrant (COMPANY *or* OFFICE), and the emergency recomposition
-  is a continuation of that authenticated flow - so a COMPANY-registered gap flows through
-  to recomposition without a FORBIDDEN. Trust on this path is IAM, not the role of the
-  original registrant.
+Authorization - trust is at the boundary, not in this handler (Req 11)
+----------------------------------------------------------------------
+Neither path applies an OFFICE gate inside this handler (there is no principal to check on
+an EventBridge event or a Lambda-to-Lambda invoke). The OFFICE-only execution rule (Req 11)
+is upheld at the publisher (only an OFFICE-authenticated A route publishes
+``ComposeRequested``) and by IAM (only gap_event may invoke agent_invoke directly). A
+COMPANY-registered gap therefore still flows through to recomposition — the emergency
+recomposition is a continuation of that already-authenticated flow (Req 11.3).
 
 State guard - conditional writes, per-path branching (Req 6.6/6.7, design section 5)
 ------------------------------------------------------------------------------------
@@ -91,10 +107,10 @@ compose_flow (single attempt) + compose_flow_with_retry (orchestration, task 6.3
 ---------------------------------------------------------------------------------
 ``compose_flow`` is ONE attempt: compose -> (on ``BedrockUnavailable``, substitute
 ``demo_fallback`` when the fallback flag is ON, Req 9.4) -> build the freshest-snapshot
-validation context (검증 직전 최신 스냅샷) -> validate -> on pass, save via the mode-specific
-persistence function -> (external EMERGENCY only) terminal ``RECOMPOSING -> PROPOSED``. On
-validation failure it raises ``AGENT_OUTPUT_INVALID`` WITHOUT saving; a Bedrock
-failure/timeout with fallback OFF maps to ``AGENT_RETRY_FAILED``.
+validation context (검증 직전 최신 스냅샷) -> validate -> on pass, NORMAL saves the Crew +
+transitions the WorkRequest (EMERGENCY persists nothing — gap_event owns it). On validation
+failure it raises ``AGENT_OUTPUT_INVALID`` WITHOUT saving; a Bedrock failure/timeout with
+fallback OFF maps to ``AGENT_RETRY_FAILED``.
 
 ``compose_flow_with_retry`` wraps that single attempt with the design's retry orchestration
 (task 6.3) and is what the handler entry paths call:
@@ -166,6 +182,7 @@ resolves on the local Python 3.9 runtime; ``Optional[...]`` is used for nullable
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -224,11 +241,8 @@ _GAP_RECOMPOSING = "RECOMPOSING"  # GapStatus.RECOMPOSING (lock held during reco
 _GAP_PROPOSED = "PROPOSED"  # GapStatus.PROPOSED (terminal transition on save success)
 _GAP_FAILED = "FAILED"  # GapStatus.FAILED (retry-exhausted terminal on the EXTERNAL route)
 
-# Role required on the external API Gateway routes (Role.OFFICE).
-_ROLE_OFFICE = "OFFICE"
-
 # Path identifiers threaded through compose_flow for call-site symmetry.
-_PATH_EXTERNAL = "external"  # API Gateway proxy event (NORMAL agent-compose)
+_PATH_EXTERNAL = "external"  # NORMAL (EventBridge ComposeRequested consumer)
 _PATH_INTERNAL = "internal"  # gap_event's trusted internal invoke (EMERGENCY)
 
 # --------------------------------------------------------------------------- #
@@ -236,9 +250,6 @@ _PATH_INTERNAL = "internal"  # gap_event's trusted internal invoke (EMERGENCY)
 # Error Handling). No new codes are invented.                                  #
 # --------------------------------------------------------------------------- #
 _ERR_STATE_CONFLICT = "STATE_CONFLICT"
-_ERR_GAP_EVENT_NOT_FOUND = "GAP_EVENT_NOT_FOUND"
-_ERR_CREW_INVALID = "CREW_INVALID"
-_ERR_FORBIDDEN = "FORBIDDEN"
 _ERR_AGENT_OUTPUT_INVALID = "AGENT_OUTPUT_INVALID"
 _ERR_AGENT_RETRY_FAILED = "AGENT_RETRY_FAILED"
 
@@ -272,9 +283,10 @@ _PAYLOAD_AGENT_INPUT = "agent_input"
 _PAYLOAD_OFFICE_ID = "office_id"
 _PAYLOAD_CURRENT_CREW_ID = "current_crew_id"
 
-# API Gateway proxy-event keys used only to distinguish an external event from an internal
-# invoke dict (shape-based routing, per the design intent).
-_APIGW_SHAPE_KEYS = ("requestContext", "httpMethod", "resource")
+# NORMAL ComposeRequested EventBridge detail keys (see module docstring). 담당자 A's
+# office_core publisher MUST build the event's ``Detail`` with these keys.
+_DETAIL_REQUEST_ID = "request_id"
+_DETAIL_OFFICE_ID = "office_id"
 
 
 class _FlowError(Exception):
@@ -321,65 +333,36 @@ def _resolve_fallback_enabled(fallback_enabled: Optional[bool]) -> bool:
 # --------------------------------------------------------------------------- #
 # Event-shape routing                                                          #
 # --------------------------------------------------------------------------- #
-def _is_api_gateway_event(event: Any) -> bool:
-    """True when the event looks like an API Gateway proxy event (external/direct)."""
-    return isinstance(event, dict) and any(k in event for k in _APIGW_SHAPE_KEYS)
-
-
 def _is_internal_invoke(event: Any) -> bool:
-    """True when the event is gap_event's trusted internal invoke payload.
+    """True when the event is gap_event's trusted internal invoke payload (EMERGENCY).
 
-    Routing hint only: the ``internal_invoke`` marker distinguishes the plain invoke dict
-    from an API Gateway proxy event. The actual trust boundary is IAM (only gap_event's
-    execution role may invoke agent_invoke directly) — a payload flag is spoofable and is
-    never treated as a security control.
+    Routing hint only: the ``internal_invoke`` marker distinguishes gap_event's plain invoke
+    dict from a ``ComposeRequested`` EventBridge event (NORMAL). The actual trust boundary is
+    IAM (only gap_event's execution role may invoke agent_invoke directly) — a payload flag is
+    spoofable and is never treated as a security control.
     """
-    return (
-        isinstance(event, dict)
-        and bool(event.get(INTERNAL_INVOKE_MARKER))
-        and not _is_api_gateway_event(event)
-    )
+    return isinstance(event, dict) and bool(event.get(INTERNAL_INVOKE_MARKER))
 
 
-def _classify_api_event(event: Dict[str, Any]) -> str:
-    """Classify an API Gateway proxy event; only NORMAL ``agent-compose`` is a valid route.
+def _extract_compose_detail(event: Any) -> Dict[str, Any]:
+    """Return the ``ComposeRequested`` detail dict from a NORMAL EventBridge event.
 
-    EMERGENCY is driven exclusively by gap_event's trusted internal invoke (there is no
-    external ``agent-recompose`` route), so any other/unrecognized API route raises.
+    An EventBridge event carries the fields under ``event["detail"]`` (a dict, or a JSON
+    string on some delivery shapes). For ergonomic direct invocation (tests / tooling) an
+    event WITHOUT a ``detail`` key that already carries the fields at the top level is treated
+    as the detail itself. Mirrors ``gap_event/handler.py``'s ``_extract_detail``.
     """
-    resource = str(event.get("resource") or event.get("path") or "")
-    path_params = event.get("pathParameters") or {}
-    if "agent-compose" in resource or "requestId" in path_params:
-        return _MODE_NORMAL
-    raise ValueError(f"unrecognized agent_invoke route: resource={resource!r}")
-
-
-def _path_param(event: Dict[str, Any], name: str) -> str:
-    """Return a required path parameter (raises when absent/empty)."""
-    value = (event.get("pathParameters") or {}).get(name)
-    if not value:
-        raise ValueError(f"missing path parameter: {name!r}")
-    return value
-
-
-# --------------------------------------------------------------------------- #
-# Authorization                                                                #
-# --------------------------------------------------------------------------- #
-def _require_office(event: Any) -> "Principal":
-    """Apply the external OFFICE-only gate and return the authenticated principal.
-
-    Consumes 담당자 A's real ``shared/auth.get_principal(event)`` +
-    ``Principal.require_role(OFFICE)``. Both raise ``responses.ApiError``
-    (UNAUTHORIZED / FORBIDDEN) which propagates to the top-level handler and is converted to
-    the matching proxy error response (Req 11.2, 11.4). This gate is applied ONLY on the
-    external API Gateway routes; the trusted internal invoke deliberately skips it (Req 11.3).
-    Callers read ``principal.office_id`` (an attribute) for the office linkage.
-    """
-    from backend.shared import auth  # lazy: real Layer in prod
-
-    principal = auth.get_principal(event)
-    principal.require_role(_ROLE_OFFICE)
-    return principal
+    if not isinstance(event, dict):
+        return {}
+    detail = event.get("detail")
+    if detail is None:
+        # No ``detail`` wrapper: treat the event itself as the detail (direct invoke / test).
+        return dict(event)
+    if isinstance(detail, str):
+        return json.loads(detail) if detail else {}
+    if isinstance(detail, dict):
+        return dict(detail)
+    return {}
 
 
 # --------------------------------------------------------------------------- #
@@ -793,11 +776,15 @@ def compose_flow_with_retry(
 # --------------------------------------------------------------------------- #
 # Per-path entry handlers                                                      #
 # --------------------------------------------------------------------------- #
-def _handle_normal(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
-    """NORMAL (external ``agent-compose``): OFFICE gate -> lock -> assemble -> compose_flow."""
-    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
+def _handle_normal(request_id: str, office_id: Optional[str]) -> Dict[str, Any]:
+    """NORMAL (``ComposeRequested`` EventBridge event): lock -> assemble -> compose_flow.
 
-    principal = _require_office(event)  # FORBIDDEN if not OFFICE (Req 11.1, 11.2)
+    No OFFICE gate here: the OFFICE-only execution rule (Req 11) is enforced at the publisher
+    (only an OFFICE-authenticated 담당자 A route publishes ``ComposeRequested``); an
+    EventBridge event carries no Cognito principal. ``request_id`` comes from the event
+    detail; ``office_id`` is optional and falls back to the WorkRequest's own ``office_id``.
+    """
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
 
     # State guard: acquire the REQUESTED -> COMPOSING lock (Req 6.6/6.7). A failed
     # conditional write (wrong state / concurrent duplicate / missing request) -> conflict.
@@ -807,7 +794,6 @@ def _handle_normal(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
             f"work request {request_id!r} not in {_REQ_REQUESTED} (already composing?)",
         )
 
-    office_id = principal.office_id
     if not office_id:
         record = db.get_work_request(request_id)
         office_id = (record or {}).get("office_id")
@@ -862,26 +848,25 @@ def _handle_internal(event: Dict[str, Any]) -> Dict[str, Any]:
 def handler(event: Any, context: Any = None) -> Dict[str, Any]:
     """agent_invoke Lambda entry point: route by event shape, then dispatch.
 
-    Routing (see module docstring): a trusted internal invoke (plain dict + marker) ->
-    EMERGENCY internal path (gap_event's EventBridge-driven recomposition); otherwise an API
-    Gateway proxy event -> NORMAL (``agent-compose``). There is no external EMERGENCY route.
-    Every mapped failure is raised internally as a ``_FlowError`` (the internal flow codes)
-    or, from the auth gate, as 담당자 A's ``responses.ApiError`` (UNAUTHORIZED / FORBIDDEN);
-    both are converted here to a single proxy error response. Success paths return
-    ``responses.success(...)``.
+    Routing (see module docstring): a trusted internal invoke (plain dict + ``internal_invoke``
+    marker) -> EMERGENCY internal path (gap_event's EventBridge-driven recomposition);
+    otherwise a ``ComposeRequested`` EventBridge event -> NORMAL. There is no API Gateway
+    proxy path and no auth gate (trust is enforced at the publisher / by IAM). Mapped failures
+    are raised internally as a ``_FlowError`` and converted here to a single
+    ``responses.error(...)`` proxy dict; success paths return ``responses.success(...)``. The
+    proxy envelope is what gap_event's internal invoke parses on the EMERGENCY path; on the
+    NORMAL path EventBridge ignores the return value.
     """
     from backend.shared import responses  # lazy: real Layer in prod
-    from backend.shared.responses import ApiError
 
     try:
         if _is_internal_invoke(event):
             return _handle_internal(event)
-        # The only external API route is NORMAL agent-compose (_classify_api_event raises on
-        # any unrecognized route).
-        _classify_api_event(event)
-        return _handle_normal(event, _path_param(event, "requestId"))
+        # Otherwise a ComposeRequested EventBridge event -> NORMAL.
+        detail = _extract_compose_detail(event)
+        request_id = detail.get(_DETAIL_REQUEST_ID)
+        if not request_id:
+            raise ValueError("ComposeRequested event missing 'request_id'")
+        return _handle_normal(request_id, detail.get(_DETAIL_OFFICE_ID))
     except _FlowError as exc:
         return responses.error(exc.code, exc.message)
-    except ApiError as exc:
-        # Auth gate (get_principal / require_role) raises this — return its proxy response.
-        return exc.to_response()

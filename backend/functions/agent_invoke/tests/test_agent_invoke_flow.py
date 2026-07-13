@@ -6,22 +6,22 @@ against the in-memory ``FakeSharedDB`` that 담당자 B's code now reaches throu
 ``shared_gateway`` adapter (installed by the ``install_shared`` fixture), with the Bedrock
 ``compose`` call replaced by a deterministic fake so no live model is invoked.
 
-Post-checkpoint-2 reality
--------------------------
-- **DB**: the ten high-level DB functions are monkeypatched onto ``FakeSharedDB`` via the
+Trigger model (post Task A/B)
+-----------------------------
+- **DB**: the high-level DB functions are monkeypatched onto ``FakeSharedDB`` via the
   ``shared_gateway`` adapter (``install_shared``). The real ``backend.shared`` package stays
   intact.
-- **Auth**: 담당자 B's handler consumes 담당자 A's REAL ``auth.get_principal`` +
-  ``Principal.require_role``, driven by claim-bearing API-Gateway events
-  (``requestContext.authorizer.claims`` with ``custom:role`` / ``custom:office_id``). A
-  non-OFFICE external caller yields a FORBIDDEN **proxy** error.
-- **Responses**: the handler returns API-Gateway proxy dicts (``{statusCode, headers,
-  body}``); the ``{success, data|error}`` envelope is JSON in ``body`` (parsed by
-  :func:`_body`).
+- **Triggers**: NORMAL is a ``ComposeRequested`` EventBridge event (``_normal_event``);
+  EMERGENCY is gap_event's trusted internal invoke (``_internal_payload``). There is no API
+  Gateway proxy path and NO in-handler auth gate — the OFFICE-only rule is enforced at the
+  publisher / by IAM, so these tests carry no Cognito claims.
+- **Responses**: the handler still returns the proxy envelope (``{statusCode, headers,
+  body}``) — gap_event parses ``body`` on the EMERGENCY path; on NORMAL EventBridge ignores
+  the return. ``_body`` decodes the ``{success, data|error}`` envelope.
 
-Concerns covered (one clearly-named test per concern; see tasks.md task 5.5): routing +
-mode, external OFFICE gate vs. trusted-internal skip, per-path state guard, save split,
-EMERGENCY terminal-transition ownership, and the freshest-snapshot validation.
+Concerns covered (one clearly-named test per concern): routing + mode, no-principal internal
+path, per-path state guard, NORMAL save split (EMERGENCY creates no Crew), EMERGENCY
+terminal-transition ownership (gap_event's), and the freshest-snapshot validation.
 
 Python 3.9: ``from __future__ import annotations`` keeps annotations lazy.
 """
@@ -50,16 +50,13 @@ OFFICE_ID = "OFFICE001"
 
 
 def _body(resp):
-    """Decode the ``{success, data|error}`` envelope from an API-Gateway proxy response."""
+    """Decode the ``{success, data|error}`` envelope from the proxy-shaped response.
+
+    compose_flow / handler still return the proxy envelope (``{statusCode, headers, body}``)
+    — it is what gap_event's internal invoke parses on the EMERGENCY path; on the NORMAL
+    EventBridge path EventBridge just ignores the return value.
+    """
     return json.loads(resp["body"])
-
-
-def _claims(role="OFFICE", office_id=OFFICE_ID, sub="user-1"):
-    """Cognito-style custom claims for an API-Gateway authorizer context."""
-    claims = {"sub": sub, "custom:role": role}
-    if office_id:
-        claims["custom:office_id"] = office_id
-    return claims
 
 
 # --------------------------------------------------------------------------- #
@@ -125,16 +122,15 @@ def _boom_compose(agent_input, *, timeout_s=None, agent=None):
 # --------------------------------------------------------------------------- #
 # Event / payload builders                                                     #
 # --------------------------------------------------------------------------- #
-def _normal_event(request_id="REQ1", *, role="OFFICE", office_id=OFFICE_ID):
-    """An API Gateway proxy event for ``POST .../requests/{requestId}/agent-compose``."""
+def _normal_event(request_id="REQ1", *, office_id=OFFICE_ID):
+    """An EventBridge ``ComposeRequested`` event (the NORMAL trigger, as A's publisher emits)."""
+    detail = {"request_id": request_id}
+    if office_id:
+        detail["office_id"] = office_id
     return {
-        "resource": "/office/requests/{requestId}/agent-compose",
-        "httpMethod": "POST",
-        "requestContext": {
-            "requestId": "apigw-normal",
-            "authorizer": {"claims": _claims(role, office_id)},
-        },
-        "pathParameters": {"requestId": request_id},
+        "source": "crewmate.office",
+        "detail-type": "ComposeRequested",
+        "detail": detail,
     }
 
 
@@ -219,7 +215,7 @@ def _call_index(db, method):
 # 1. Routing & mode setting                                                    #
 # =========================================================================== #
 def test_normal_route_runs_in_normal_mode_and_succeeds(install_shared, monkeypatch):
-    """agent-compose routes to NORMAL mode and produces a validated, saved proposal."""
+    """A ComposeRequested EventBridge event routes to NORMAL and produces a saved proposal."""
     db = install_shared.db
     _seed_normal(db)
     monkeypatch.setattr(handler, "compose", _fake_compose)
@@ -254,33 +250,15 @@ def test_internal_invoke_routes_to_emergency_mode(install_shared, monkeypatch):
 
 
 # =========================================================================== #
-# 2. Authorization - external OFFICE gate vs. trusted internal path            #
+# 2. Authorization - no in-handler gate (trust is publisher / IAM enforced)    #
 # =========================================================================== #
-@pytest.mark.parametrize("role", ["COMPANY", "WORKER"])
-def test_external_compose_rejects_non_office_with_forbidden(install_shared, monkeypatch, role):
-    """External/direct agent-compose by a non-OFFICE subject is FORBIDDEN (no side effects)."""
-    db = install_shared.db
-    _seed_normal(db)
-    monkeypatch.setattr(handler, "compose", _boom_compose)  # must not reach compose
+def test_internal_invoke_needs_no_principal_and_proceeds(install_shared, monkeypatch):
+    """The trusted internal invoke proceeds with NO Cognito principal (Req 11.3).
 
-    resp = handler.handler(_normal_event("REQ1", role=role))
-    body = _body(resp)
-
-    assert resp["statusCode"] == 403
-    assert body["success"] is False
-    assert body["error"]["code"] == "FORBIDDEN"
-    # The OFFICE gate rejected the caller and nothing was written.
-    assert db.saved_crews == []
-    assert db.status_transitions == []
-    assert db.gap_status_transitions == []
-
-
-def test_internal_invoke_from_company_registered_gap_is_not_forbidden(install_shared, monkeypatch):
-    """A COMPANY-registered gap's internal invoke proceeds WITHOUT a FORBIDDEN (Req 11.3).
-
-    The internal payload carries NO claims; if the internal path had applied the OFFICE gate
-    (get_principal), a claimless event would raise UNAUTHORIZED. Flowing through to a saved
-    proposal proves the gate is skipped entirely on the trusted internal path.
+    Neither entry path applies an OFFICE gate any more (NORMAL is publisher-authorized, the
+    internal invoke is IAM-authorized). The internal payload carries no claims, so flowing
+    through to a successful EMERGENCY compose proves no principal is required on this path —
+    a COMPANY-registered gap's recomposition is not blocked.
     """
     db = install_shared.db
     _seed_internal_workers(db)
@@ -289,7 +267,7 @@ def test_internal_invoke_from_company_registered_gap_is_not_forbidden(install_sh
     resp = handler.handler(_internal_payload(_emergency_agent_input()))
     body = _body(resp)
 
-    assert body["success"] is True  # NOT forbidden / unauthorized
+    assert body["success"] is True  # not blocked for lack of a principal
     assert db.saved_crews == []  # option-1: EMERGENCY creates no Crew
     assert len(body["data"]["recommendations"]) == 1
 

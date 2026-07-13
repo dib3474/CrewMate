@@ -15,7 +15,8 @@ REAL (wired together, not stubbed):
 Mocked / stubbed (the four external boundaries):
 - ``shared/db``   — the in-memory ``FakeSharedDB`` reached through the ``shared_gateway``
   adapter (``install_shared``). Both Lambdas import the adapter, so they share ONE instance.
-- ``Cognito``     — driven by claim-bearing API-Gateway events (``custom:role`` etc.).
+- ``EventBridge`` — NORMAL is triggered by a ``ComposeRequested`` event and EMERGENCY by a
+  ``GapEventDetected`` event (built as plain dicts; no Cognito principal on either).
 - ``Bedrock``     — the live ``compose`` call is monkeypatched to a deterministic fake.
 - ``Lambda invoke`` — the ``gap_event → agent_invoke`` seam (``invoke_agent``) is
   monkeypatched to call ``agent_invoke``'s REAL handler directly with the internal payload;
@@ -38,16 +39,6 @@ OFFICE_ID = "OFFICE001"
 def _body(resp):
     """Decode the ``{success, data|error}`` envelope from an API-Gateway proxy response."""
     return json.loads(resp["body"])
-
-
-def _claims(role, office_id=OFFICE_ID, company_id=None, sub="user-1"):
-    """Cognito-style custom claims for an API-Gateway authorizer context."""
-    claims = {"sub": sub, "custom:role": role}
-    if office_id:
-        claims["custom:office_id"] = office_id
-    if company_id:
-        claims["custom:company_id"] = company_id
-    return claims
 
 
 # --------------------------------------------------------------------------- #
@@ -99,18 +90,14 @@ def _fake_compose(agent_input, *, timeout_s=None, agent=None):
 
 
 # --------------------------------------------------------------------------- #
-# API Gateway event / registration builders                                   #
+# EventBridge event builders                                                   #
 # --------------------------------------------------------------------------- #
-def _normal_event(request_id, *, role="OFFICE", office_id=OFFICE_ID):
-    """An API Gateway proxy event for ``POST .../requests/{requestId}/agent-compose``."""
+def _normal_event(request_id, *, office_id=OFFICE_ID):
+    """An EventBridge ``ComposeRequested`` event (the NORMAL trigger A's office_core emits)."""
     return {
-        "resource": "/office/requests/{requestId}/agent-compose",
-        "httpMethod": "POST",
-        "requestContext": {
-            "requestId": "apigw-normal",
-            "authorizer": {"claims": _claims(role, office_id)},
-        },
-        "pathParameters": {"requestId": request_id},
+        "source": "crewmate.office",
+        "detail-type": "ComposeRequested",
+        "detail": {"request_id": request_id, "office_id": office_id},
     }
 
 
@@ -191,7 +178,7 @@ def _call_index(db, method):
 # Path 1 — NORMAL happy path (demo scenario 2: 요청 → AI 편성 → 저장)            #
 # =========================================================================== #
 def test_normal_end_to_end_request_to_saved_proposal(install_shared, monkeypatch):
-    """NORMAL agent-compose end-to-end: request → assembly → compose → freshest snapshot →
+    """NORMAL ComposeRequested end-to-end: event → assembly → compose → freshest snapshot →
     validate → Crew(PROPOSED) saved + WorkRequest COMPOSING→PROPOSED (demo scenario 2)."""
     db = install_shared.db
 
