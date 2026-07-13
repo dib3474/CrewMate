@@ -47,6 +47,8 @@ Python 3.9: ``from __future__ import annotations`` keeps annotations lazy.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agent.crew_agent import BedrockUnavailable
@@ -65,6 +67,11 @@ from backend.functions.agent_invoke.fallback import demo_fallback
 from backend.functions.agent_invoke.persistence import SaveContext
 
 OFFICE_ID = "OFFICE001"
+
+
+def _body(resp):
+    """Decode the ``{success, data|error}`` envelope from an API-Gateway proxy response."""
+    return json.loads(resp["body"])
 
 
 # --------------------------------------------------------------------------- #
@@ -240,7 +247,7 @@ def test_retry_recovers_when_second_attempt_is_valid(install_shared):
         compose_fn=scripted, fallback_enabled=False,
     )
 
-    assert resp["success"] is True
+    assert _body(resp)["success"] is True
     assert scripted.calls == 2  # recovered on the retry
     assert len(db.saved_crews) == 1
     assert db.saved_crews[0]["status"] == "PROPOSED"
@@ -377,8 +384,9 @@ def test_fallback_on_bedrock_failure_keeps_demo_path_and_saves(install_shared):
         agent_input, save_ctx, path=handler._PATH_EXTERNAL,
         compose_fn=scripted, fallback_enabled=True,
     )
+    body = _body(resp)
 
-    assert resp["success"] is True
+    assert body["success"] is True
     assert scripted.calls == 1  # a down Bedrock is served by the fallback, not retried
     assert len(db.saved_crews) == 1
     assert db.saved_crews[0]["status"] == "PROPOSED"
@@ -387,10 +395,11 @@ def test_fallback_on_bedrock_failure_keeps_demo_path_and_saves(install_shared):
     # The saved proposal is the deterministic demo output (Bedrock raised, so nothing else
     # could have produced it) — proving the demo path was taken and validated.
     expected = demo_fallback(agent_input)
-    assert resp["data"]["recommendations"] == [r.model_dump() for r in expected.recommendations]
+    assert body["data"]["recommendations"] == [r.model_dump() for r in expected.recommendations]
     top = min(expected.recommendations, key=lambda r: r.rank)
     assert db.saved_crews[0]["member_ids"] == top.member_ids
-    assert db.saved_crews[0]["total_cost"] == top.total_cost
+    # ``total_cost`` on the recommendation maps to the canonical Crew's ``estimated_cost``.
+    assert db.saved_crews[0]["estimated_cost"] == top.total_cost
 
 
 def test_fallback_off_bedrock_failure_returns_retry_failed_without_retry_or_save(install_shared):

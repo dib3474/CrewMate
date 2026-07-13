@@ -1,54 +1,25 @@
 """Mocked end-to-end integration test — the capstone for 담당자 B (task 9.4).
 
-This is the REQUIRED (별표 없음) integration test that automatically verifies the code
-paths behind demo scenarios 2 and 3 (요청→AI 편성→저장, C 노쇼→A+B+E 추천→저장). Unlike the
-per-module unit tests, it wires the REAL modules together and mocks ONLY the external
-boundaries — so it proves the pieces actually compose into the three designed flows.
+This is the REQUIRED integration test that automatically verifies the code paths behind
+demo scenarios 2 and 3 (요청→AI 편성→저장, C 노쇼→A+B+E 추천→저장). It wires the REAL modules
+together and mocks ONLY the external boundaries — proving the pieces compose into the three
+designed flows.
 
-What is exercised REAL vs. what is mocked (design.md → "Testing Strategy" → 통합/모킹)
-------------------------------------------------------------------------------------
 REAL (wired together, not stubbed):
 - ``agent_invoke`` handler → assembler → validator → persistence orchestration.
-- ``gap_event`` handler → gap_logic (``compute_fixed_members`` / ``compute_missing``) →
-  ``build_emergency_payload`` → the trusted internal invoke of ``agent_invoke``.
-- The freshest-snapshot validation context (``build_validation_context``) built from the
-  same in-memory DB the flow writes to.
+- ``gap_event`` handler → gap_logic → ``build_emergency_payload`` → trusted internal invoke.
+- ``backend.shared.auth`` (real ``get_principal`` / ``require_role``, driven by claims) and
+  ``backend.shared.responses`` (handlers return proxy responses).
+- The freshest-snapshot validation context built from the same in-memory DB.
 
-Mocked / stubbed (the four external boundaries task 9.4 calls out):
-- ``shared/db``   — the in-memory :class:`FakeSharedDB` installed under ``backend.shared.db``
-  by the ``install_shared`` fixture (conftest.py). Both Lambdas import it lazily, so they
-  share ONE instance and observe consistent state.
-- ``shared/auth`` — the :class:`StubAuth` installed under ``backend.shared.auth``.
-- ``Bedrock``     — the live ``compose`` call is monkeypatched to a deterministic fake that
-  derives a rule-compliant :class:`AgentOutput` from the assembled input (no live model).
-- ``Lambda invoke`` — the ``gap_event → agent_invoke`` synchronous invoke seam
-  (``gap_event.handler.invoke_agent``) is monkeypatched to call ``agent_invoke``'s REAL
-  handler directly with the internal payload. That is the whole point of the EMERGENCY
-  internal test: it drives the true internal-invoke CONTRACT end-to-end (marker + payload
-  shape + IAM-trusted skip-the-OFFICE-gate) against the SAME FakeSharedDB, rather than
-  stubbing agent_invoke out.
-
-The three end-to-end paths (task 9.4)
--------------------------------------
-1. NORMAL (demo scenario 2): OFFICE ``agent-compose`` → assemble → compose → freshest
-   snapshot → validate → Crew(PROPOSED, source=AGENT) saved + WorkRequest
-   ``COMPOSING→PROPOSED``.                                        (Req 6.2, 6.5, 8.1, 8.2)
-2. EMERGENCY, trusted internal invoke (demo scenario 3, C no-show → A+B+E): a COMPANY-
-   registered gap → gap_event computes fixed_members/shortage and locks
-   ``DETECTED→RECOMPOSING`` → synchronous internal invoke of agent_invoke → Crew(PROPOSED)
-   saved WITHOUT a WorkRequest transition → **gap_event** owns the terminal
-   ``RECOMPOSING→PROPOSED``.                                      (Req 10.6, 10.7)
-3. EMERGENCY, external/direct ``agent-recompose``: OFFICE call → agent_invoke self-acquires
-   ``DETECTED→RECOMPOSING`` → **server-side** payload assembly (reusing
-   ``compute_fixed_members`` / ``compute_missing`` / ``build_emergency_payload``) → Crew
-   (PROPOSED) saved WITHOUT a WorkRequest transition → **agent_invoke (compose_flow)** owns
-   the terminal ``RECOMPOSING→PROPOSED``.                         (Req 6.2, 10.6, 10.7)
-
-Both EMERGENCY paths stop at PROPOSED — APPROVED/FILLED, worker READY→RESERVED→RUNNING
-assignment, and departed-worker INACTIVE handling are 담당자 A's emergency approval API and
-are explicitly asserted to NOT occur here.
-
-These are EXAMPLE / integration tests (plain pytest — no Hypothesis, no ``property`` marker).
+Mocked / stubbed (the four external boundaries):
+- ``shared/db``   — the in-memory ``FakeSharedDB`` reached through the ``shared_gateway``
+  adapter (``install_shared``). Both Lambdas import the adapter, so they share ONE instance.
+- ``Cognito``     — driven by claim-bearing API-Gateway events (``custom:role`` etc.).
+- ``Bedrock``     — the live ``compose`` call is monkeypatched to a deterministic fake.
+- ``Lambda invoke`` — the ``gap_event → agent_invoke`` seam (``invoke_agent``) is
+  monkeypatched to call ``agent_invoke``'s REAL handler directly with the internal payload;
+  it returns the same API-Gateway PROXY response the production boto3 invoke would.
 
 Python 3.9: ``from __future__ import annotations`` keeps annotations lazy.
 """
@@ -64,23 +35,26 @@ from backend.functions.gap_event import handler as gap_handler
 OFFICE_ID = "OFFICE001"
 
 
+def _body(resp):
+    """Decode the ``{success, data|error}`` envelope from an API-Gateway proxy response."""
+    return json.loads(resp["body"])
+
+
+def _claims(role, office_id=OFFICE_ID, company_id=None, sub="user-1"):
+    """Cognito-style custom claims for an API-Gateway authorizer context."""
+    claims = {"sub": sub, "custom:role": role}
+    if office_id:
+        claims["custom:office_id"] = office_id
+    if company_id:
+        claims["custom:company_id"] = company_id
+    return claims
+
+
 # --------------------------------------------------------------------------- #
 # Fake Bedrock compose (deterministic; no live model)                          #
 # --------------------------------------------------------------------------- #
 def _valid_output_for(agent_input: AgentInput) -> AgentOutput:
-    """Build a rule-compliant :class:`AgentOutput` derived from ``agent_input``.
-
-    Produces ONE recommendation (rank 1) that exactly satisfies the request's required
-    trade/headcount: every EMERGENCY ``fixed_members`` entry is kept and the remaining
-    per-trade shortage is filled from the candidate pool. ``total_cost`` is the sum of the
-    retained fixed-member wages plus the picked candidates' wages. Because the tests seed the
-    DB workers with the SAME wages/trades as this pool, the freshest ``get_workers`` snapshot
-    the validator uses matches this ``total_cost`` and the output validates (Property 1-8).
-
-    Deriving the output from the ACTUAL (possibly server-assembled) ``agent_input`` lets the
-    same fake serve the NORMAL, EMERGENCY-internal, and EMERGENCY-external flows unchanged —
-    which is exactly what makes this a genuine end-to-end wiring rather than a canned reply.
-    """
+    """Build a rule-compliant :class:`AgentOutput` derived from ``agent_input``."""
     required: Counter = Counter()
     for tr in agent_input.request.required_workers:
         required[tr.trade] += tr.count
@@ -127,38 +101,51 @@ def _fake_compose(agent_input, *, timeout_s=None, agent=None):
 # --------------------------------------------------------------------------- #
 # API Gateway event / registration builders                                   #
 # --------------------------------------------------------------------------- #
-def _normal_event(request_id):
+def _normal_event(request_id, *, role="OFFICE", office_id=OFFICE_ID):
     """An API Gateway proxy event for ``POST .../requests/{requestId}/agent-compose``."""
     return {
         "resource": "/office/requests/{requestId}/agent-compose",
         "httpMethod": "POST",
-        "requestContext": {"requestId": "apigw-normal"},
+        "requestContext": {
+            "requestId": "apigw-normal",
+            "authorizer": {"claims": _claims(role, office_id)},
+        },
         "pathParameters": {"requestId": request_id},
     }
 
 
-def _recompose_event(event_id):
+def _recompose_event(event_id, *, role="OFFICE", office_id=OFFICE_ID):
     """An API Gateway proxy event for ``POST .../gap-events/{eventId}/agent-recompose``."""
     return {
         "resource": "/office/gap-events/{eventId}/agent-recompose",
         "httpMethod": "POST",
-        "requestContext": {"requestId": "apigw-emergency"},
+        "requestContext": {
+            "requestId": "apigw-emergency",
+            "authorizer": {"claims": _claims(role, office_id)},
+        },
         "pathParameters": {"eventId": event_id},
     }
 
 
-def _gap_registration_event(crew_id, gap_type="NO_SHOW", departed_ids=("C",)):
-    """An API Gateway proxy event for ``POST .../crews/{crewId}/gap-events`` (registration).
+def _gap_detected_eventbridge_event(event_id, crew_id, request_id, gap_type="NO_SHOW",
+                                    missing_worker_ids=("C",), *, office_id=OFFICE_ID):
+    """An EventBridge ``GapEventDetected`` event, as ``company_request`` would publish it.
 
-    ``crewId`` arrives as a path parameter; ``type`` / ``departed_ids`` in the JSON body (a
-    string, as API Gateway delivers it).
+    ``company_request`` creates the GapEvent (DETECTED) and publishes this event's ``detail``
+    to EventBridge; gap_event is the target that consumes it. Mirrors
+    ``company_request._publish_gap_event``'s Detail schema exactly.
     """
     return {
-        "resource": "/company/crews/{crewId}/gap-events",
-        "httpMethod": "POST",
-        "requestContext": {"requestId": "apigw-gap"},
-        "pathParameters": {"crewId": crew_id},
-        "body": json.dumps({"type": gap_type, "departed_ids": list(departed_ids)}),
+        "source": "crewmate.company",
+        "detail-type": "GapEventDetected",
+        "detail": {
+            "event_id": event_id,
+            "office_id": office_id,
+            "crew_id": crew_id,
+            "request_id": request_id,
+            "gap_type": gap_type,
+            "missing_worker_ids": list(missing_worker_ids),
+        },
     }
 
 
@@ -166,12 +153,7 @@ def _gap_registration_event(crew_id, gap_type="NO_SHOW", departed_ids=("C",)):
 # Seeding helpers                                                              #
 # --------------------------------------------------------------------------- #
 def _seed_running_crew_ABC(db, *, crew_id, request_id, office_id=OFFICE_ID):
-    """Seed a RUNNING crew (A, B, C all RUNNING FORMWORK) + a READY replacement E.
-
-    The linked WorkRequest is already RUNNING (as it would be during a mid-job emergency),
-    requires FORMWORK:3, and each crew member's wage matches its worker record so the
-    freshest ``get_workers`` snapshot the validator uses agrees with the assembled payload.
-    """
+    """Seed a RUNNING crew (A, B, C all RUNNING FORMWORK) + a READY replacement E."""
     db.add_work_request(
         request_id,
         status="RUNNING",  # during an emergency the original request may already be RUNNING
@@ -179,7 +161,7 @@ def _seed_running_crew_ABC(db, *, crew_id, request_id, office_id=OFFICE_ID):
         required_workers=[{"trade": "FORMWORK", "count": 3}],
         budget=2_000_000,
         priority={"cost": "MEDIUM", "skill": "HIGH", "teamwork": "HIGH"},
-        site="현장 E",
+        site_name="현장 E",
         work_date="2025-01-02",
         start_time="07:00",
     )
@@ -196,18 +178,15 @@ def _seed_running_crew_ABC(db, *, crew_id, request_id, office_id=OFFICE_ID):
              "state": "RUNNING"},
         ],
     )
-    # A, B stay RUNNING in the crew being recomposed (fixed members).
     db.add_worker("A", office_id=office_id, state="RUNNING", trade="FORMWORK",
                   desired_daily_wage=150_000, current_crew_id=crew_id,
                   skill_level=4, career_years=9)
     db.add_worker("B", office_id=office_id, state="RUNNING", trade="FORMWORK",
                   desired_daily_wage=155_000, current_crew_id=crew_id,
                   skill_level=4, career_years=7)
-    # C is the departed (no-show / left-site) worker.
     db.add_worker("C", office_id=office_id, state="RUNNING", trade="FORMWORK",
                   desired_daily_wage=160_000, current_crew_id=crew_id,
                   skill_level=3, career_years=5)
-    # E is the READY replacement the agent draws on to fill the shortage.
     db.add_worker("E", office_id=office_id, state="READY", trade="FORMWORK",
                   desired_daily_wage=158_000, current_crew_id=None,
                   skill_level=4, career_years=6)
@@ -225,16 +204,9 @@ def _call_index(db, method):
 # Path 1 — NORMAL happy path (demo scenario 2: 요청 → AI 편성 → 저장)            #
 # =========================================================================== #
 def test_normal_end_to_end_request_to_saved_proposal(install_shared, monkeypatch):
-    """NORMAL agent-compose end-to-end: request → candidate assembly → compose → freshest
-    snapshot → validate → Crew(PROPOSED) saved + WorkRequest COMPOSING→PROPOSED.
-
-    Demo scenario 2. Only the four external boundaries are mocked (shared/db + shared/auth
-    via install_shared, Bedrock via the compose monkeypatch); the assemble→validate→persist
-    chain is the real code.
-    """
+    """NORMAL agent-compose end-to-end: request → assembly → compose → freshest snapshot →
+    validate → Crew(PROPOSED) saved + WorkRequest COMPOSING→PROPOSED (demo scenario 2)."""
     db = install_shared.db
-    # OFFICE is the StubAuth default — the external agent-compose route requires it.
-    assert install_shared.auth.role == "OFFICE"
 
     db.add_work_request(
         "REQ-N1",
@@ -243,7 +215,7 @@ def test_normal_end_to_end_request_to_saved_proposal(install_shared, monkeypatch
         required_workers=[{"trade": "FORMWORK", "count": 2}],
         budget=1_000_000,
         priority={"cost": "HIGH", "skill": "MEDIUM", "teamwork": "LOW"},
-        site="현장 A",
+        site_name="현장 A",
         work_date="2025-01-01",
         start_time="08:00",
     )
@@ -257,17 +229,17 @@ def test_normal_end_to_end_request_to_saved_proposal(install_shared, monkeypatch
     db.add_worker("OTHER", office_id="OFFICE999", state="READY", trade="FORMWORK",
                   desired_daily_wage=140_000)
 
-    # Bedrock mocked: compose returns a compliant output derived from the assembled input.
     monkeypatch.setattr(agent_invoke_handler, "compose", _fake_compose)
 
     resp = agent_invoke_handler.handler(_normal_event("REQ-N1"))
+    body = _body(resp)
 
     # --- success response with recommendations (Req 6.2) ---
-    assert resp["success"] is True
-    assert resp["data"]["mode"] == "NORMAL"
-    assert resp["data"]["request_id"] == "REQ-N1"
-    assert resp["data"]["crew_id"]
-    assert len(resp["data"]["recommendations"]) == 1
+    assert body["success"] is True
+    assert body["data"]["mode"] == "NORMAL"
+    assert body["data"]["request_id"] == "REQ-N1"
+    assert body["data"]["crew_id"]
+    assert len(body["data"]["recommendations"]) == 1
 
     # --- Crew(status=PROPOSED, source=AGENT) saved with the recommended members (Req 8.1) ---
     assert len(db.saved_crews) == 1
@@ -291,12 +263,6 @@ def test_normal_end_to_end_request_to_saved_proposal(install_shared, monkeypatch
     assert set(get_workers_calls[0]["worker_ids"]) == {"W1", "W2"}
     assert 0 <= _call_index(db, "get_workers") < _call_index(db, "save_crew")
 
-    # --- four boundaries mocked/stubbed: shared/auth OFFICE gate consulted once; shared/db is
-    #     the in-memory fake (crew + transitions above); Bedrock replaced (our fake ran); no
-    #     Lambda invoke on the single-Lambda NORMAL route. ---
-    assert len(install_shared.auth.calls) == 1
-    assert install_shared.auth.calls[0]["roles"] == ["OFFICE"]
-
 
 # =========================================================================== #
 # Path 2 — EMERGENCY trusted internal invoke (demo scenario 3: C 노쇼 → A+B+E)  #
@@ -307,22 +273,21 @@ def test_emergency_internal_invoke_end_to_end_no_show_recompose(install_shared, 
     A COMPANY-registered NO_SHOW gap on a RUNNING crew (C departs) drives
     ``DETECTED→RECOMPOSING→PROPOSED``: gap_event computes fixed_members (A, B) and the
     shortage, locks the GapEvent, and synchronously invokes agent_invoke's REAL handler
-    (the monkeypatched Lambda-invoke seam) against the SAME FakeSharedDB. agent_invoke saves
-    Crew(PROPOSED) WITHOUT touching the WorkRequest, and **gap_event** owns the terminal
-    ``RECOMPOSING→PROPOSED`` (agent_invoke does not transition the GapEvent on this path).
+    against the SAME FakeSharedDB. **gap_event** owns the terminal ``RECOMPOSING→PROPOSED``.
     """
     db = install_shared.db
-    # A COMPANY-registered gap must still flow through the trusted internal invoke (Req 11.3):
-    # the internal path is IAM-trusted and does NOT re-apply agent_invoke's OFFICE gate.
-    install_shared.auth.role = "COMPANY"
     _seed_running_crew_ABC(db, crew_id="CREW-E1", request_id="REQ-E1")
+    # company_request has ALREADY created the GapEvent as DETECTED and published the
+    # EventBridge event; seed that DETECTED gap so gap_event only recomposes it.
+    event_id = "GE-E1"
+    db.add_gap_event(event_id, status="DETECTED", crew_id="CREW-E1", request_id="REQ-E1",
+                     missing_worker_ids=["C"], gap_type="NO_SHOW", office_id=OFFICE_ID)
 
-    # Bedrock mocked on agent_invoke.
     monkeypatch.setattr(agent_invoke_handler, "compose", _fake_compose)
 
     # Wire the gap_event → agent_invoke internal invoke: replace the boto3/Lambda seam with a
-    # DIRECT call to agent_invoke's REAL handler, capturing the payload so we can assert the
-    # trusted-internal contract. This is what exercises the real internal-invoke path E2E.
+    # DIRECT call to agent_invoke's REAL handler (which returns a PROXY response), capturing
+    # the payload so we can assert the trusted-internal contract.
     invoked_payloads = []
 
     def _internal_invoke(payload):
@@ -331,20 +296,18 @@ def test_emergency_internal_invoke_end_to_end_no_show_recompose(install_shared, 
 
     monkeypatch.setattr(gap_handler, "invoke_agent", _internal_invoke)
 
-    resp = gap_handler.handler(_gap_registration_event("CREW-E1", "NO_SHOW", ["C"]))
+    result = gap_handler.handler(
+        _gap_detected_eventbridge_event(event_id, "CREW-E1", "REQ-E1", "NO_SHOW", ["C"])
+    )
 
-    # --- gap_event success response: EMERGENCY, ended at PROPOSED ---
-    assert resp["success"] is True
-    assert resp["data"]["mode"] == "EMERGENCY"
-    assert resp["data"]["gap_status"] == "PROPOSED"
+    # --- gap_event status dict (EventBridge Lambda → plain dict): EMERGENCY, ended at PROPOSED ---
+    assert result["mode"] == "EMERGENCY"
+    assert result["gap_status"] == "PROPOSED"
+    assert result["event_id"] == event_id
 
-    # --- GapEvent saved DETECTED first, in the office-query-path form (Req 10.1) ---
-    assert db.method_calls("save_gap_event")
-    saved_gap = db.saved_gap_events[0]
-    assert saved_gap["office_id"] == OFFICE_ID  # office query-path key
-    assert saved_gap["type"] == "NO_SHOW"
-    assert saved_gap["crew_id"] == "CREW-E1"
-    event_id = saved_gap["event_id"]
+    # --- gap_event does NOT create the GapEvent (company_request did) ---
+    assert db.method_calls("save_gap_event") == []
+    assert db.saved_gap_events == []
 
     # --- the Lambda-invoke seam actually fired, with the trusted-internal contract ---
     assert len(invoked_payloads) == 1
@@ -362,7 +325,6 @@ def test_emergency_internal_invoke_end_to_end_no_show_recompose(install_shared, 
     crew = db.saved_crews[0]
     assert crew["status"] == "PROPOSED"
     assert crew["source"] == "AGENT"
-    assert crew["gap_event_id"] == event_id
     # A+B+E recommended: fixed members preserved, departed C excluded, replacement E filled.
     assert set(crew["member_ids"]) == {"A", "B", "E"}
     assert "C" not in crew["member_ids"]
@@ -394,12 +356,6 @@ def test_emergency_internal_invoke_end_to_end_no_show_recompose(install_shared, 
     assert db.workers["C"]["state"] == "RUNNING"  # departed worker not mutated here
     assert db.workers["E"]["state"] == "READY"    # replacement not reserved/assigned
 
-    # --- four boundaries mocked/stubbed: shared/auth consulted ONLY by gap_event (COMPANY|OFFICE),
-    #     and the internal agent_invoke path skipped the OFFICE gate entirely (Req 11.3); the
-    #     Lambda-invoke seam was our stub; Bedrock replaced; shared/db is the shared fake. ---
-    assert len(install_shared.auth.calls) == 1
-    assert install_shared.auth.calls[0]["roles"] == ["COMPANY", "OFFICE"]
-
 
 # =========================================================================== #
 # Path 3 — EMERGENCY external/direct agent-recompose                           #
@@ -408,27 +364,22 @@ def test_emergency_external_recompose_end_to_end(install_shared, monkeypatch):
     """External OFFICE agent-recompose end-to-end: agent_invoke self-locks, assembles the
     EMERGENCY payload SERVER-SIDE, saves Crew(PROPOSED) without a WorkRequest transition, and
     (compose_flow) owns the terminal ``RECOMPOSING→PROPOSED``.
-
-    Server-side assembly reuses task 8.1's ``compute_fixed_members`` / ``compute_missing`` and
-    task 8.4's ``build_emergency_payload`` — verified by the saved crew reflecting the retained
-    fixed members (A, B) plus the filled shortage (E), with the departed worker (C) excluded,
-    even though the client body carries no payload (it is not trusted).
     """
     db = install_shared.db
-    install_shared.auth.role = "OFFICE"  # external route requires OFFICE
     _seed_running_crew_ABC(db, crew_id="CREW-X1", request_id="REQ-X1")
     # A GapEvent already DETECTED (as gap_event would have saved it) links to the crew.
     db.add_gap_event("GE-X1", status="DETECTED", crew_id="CREW-X1",
-                     departed_ids=["C"], type="LEFT_SITE", office_id=OFFICE_ID)
+                     missing_worker_ids=["C"], gap_type="LEFT_SITE", office_id=OFFICE_ID)
 
     monkeypatch.setattr(agent_invoke_handler, "compose", _fake_compose)
 
     resp = agent_invoke_handler.handler(_recompose_event("GE-X1"))
+    body = _body(resp)
 
-    # --- success response: EMERGENCY, links the GapEvent ---
-    assert resp["success"] is True
-    assert resp["data"]["mode"] == "EMERGENCY"
-    assert resp["data"]["gap_event_id"] == "GE-X1"
+    # --- success response: EMERGENCY, links the GapEvent (in the RESPONSE, not the Crew item) ---
+    assert body["success"] is True
+    assert body["data"]["mode"] == "EMERGENCY"
+    assert body["data"]["gap_event_id"] == "GE-X1"
 
     # --- server-side assembly happened: crew looked up + READY candidates queried ---
     assert db.method_calls("get_crew")[0]["crew_id"] == "CREW-X1"
@@ -439,7 +390,6 @@ def test_emergency_external_recompose_end_to_end(install_shared, monkeypatch):
     crew = db.saved_crews[0]
     assert crew["status"] == "PROPOSED"
     assert crew["source"] == "AGENT"
-    assert crew["gap_event_id"] == "GE-X1"
     assert set(crew["member_ids"]) == {"A", "B", "E"}
     assert "C" not in crew["member_ids"]
     # EMERGENCY never transitions the WorkRequest (it is RUNNING).
@@ -469,7 +419,3 @@ def test_emergency_external_recompose_end_to_end(install_shared, monkeypatch):
     assert db.workers["A"]["state"] == "RUNNING"
     assert db.workers["C"]["state"] == "RUNNING"
     assert db.workers["E"]["state"] == "READY"
-
-    # --- four boundaries mocked/stubbed: shared/auth OFFICE gate consulted; shared/db is the
-    #     in-memory fake; Bedrock replaced; no Lambda invoke on the single-Lambda external route. ---
-    assert install_shared.auth.calls[0]["roles"] == ["OFFICE"]

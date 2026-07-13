@@ -76,7 +76,7 @@ from tests.mocks.shared_stubs import (
     ErrorCode,
     GapStatus,
     RequestStatus,
-    install_shared_stubs,
+    install_fake_db,
 )
 from tests.strategies import sufficient_agent_inputs, text_values
 
@@ -180,8 +180,7 @@ def test_invalid_output_is_never_saved(mode: str, data: st.DataObject) -> None:
         return invalid_output
 
     with pytest.MonkeyPatch.context() as mp:
-        stubs = install_shared_stubs(mp)
-        db = stubs.db
+        db = install_fake_db(mp)
 
         if mode == "NORMAL":
             request_id = agent_input.request.request_id

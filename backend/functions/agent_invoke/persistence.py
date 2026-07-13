@@ -110,37 +110,43 @@ class SaveContext:
     crew_id: Optional[str] = None
 
 
-def _build_crew_item(recommendation: Recommendation, ctx: SaveContext) -> Dict[str, Any]:
-    """Assemble the ``Crew(status=PROPOSED, source=AGENT)`` item for ``save_crew``.
+def _fold_rationale(recommendation: Recommendation) -> str:
+    """Fold the recommendation ``reason`` + ``considerations`` into one ``rationale`` string.
 
-    Faithfully persists the recommendation (members, cost, rank, rationale) plus the
-    request/office/work_date linkage. EMERGENCY linkage fields (``gap_event_id``,
-    ``current_crew_id``) are included only when provided. ``crew_id`` is omitted when
-    unset so the db helper can assign one. The exact Crew table schema is 담당자 A's;
-    these field names follow the shared-contract concepts in design.md.
+    The canonical Crew schema (``schemas.build_crew``) has a single free-text ``rationale``
+    field and no ``considerations`` list, so the considerations are appended to the reason
+    text rather than dropped (design decision — see the module docstring of
+    ``shared_gateway``). ``rank`` has no canonical home and is not persisted.
     """
-    item: Dict[str, Any] = {
-        "status": _CREW_PROPOSED,
-        "source": ctx.source,
-        "request_id": ctx.request_id,
-        "rank": recommendation.rank,
-        "member_ids": list(recommendation.member_ids),
-        "total_cost": recommendation.total_cost,
-        "reason": recommendation.reason,
-        "considerations": list(recommendation.considerations),
-    }
-    if ctx.crew_id is not None:
-        item["crew_id"] = ctx.crew_id
-    if ctx.office_id is not None:
-        item["office_id"] = ctx.office_id
-    if ctx.work_date is not None:
-        item["work_date"] = ctx.work_date
-    # EMERGENCY linkage — present only when the caller supplied it.
-    if ctx.gap_event_id is not None:
-        item["gap_event_id"] = ctx.gap_event_id
-    if ctx.current_crew_id is not None:
-        item["current_crew_id"] = ctx.current_crew_id
-    return item
+    reason = recommendation.reason or ""
+    considerations = [c for c in recommendation.considerations if c]
+    if considerations:
+        joined = " · ".join(considerations)
+        return f"{reason} (고려사항: {joined})" if reason else f"고려사항: {joined}"
+    return reason
+
+
+def _save_crew_via_adapter(db: Any, recommendation: Recommendation, ctx: SaveContext) -> str:
+    """Persist the chosen recommendation as a ``Crew(PROPOSED, source=AGENT)`` via the adapter.
+
+    Maps the recommendation onto the adapter's ``save_crew`` kwargs, which build the canonical
+    ``schemas.build_crew`` item: ``reason → rationale`` (with ``considerations`` folded in),
+    ``total_cost → estimated_cost``, preserving ``member_ids`` / ``source``. The
+    EMERGENCY linkage (``gap_event_id`` / ``current_crew_id``) is intentionally NOT persisted
+    on the Crew item — the canonical schema has no such field — and is surfaced only in the
+    agent_invoke response (sourced from ``SaveContext``). ``rank`` is dropped (no canonical
+    home). Returns the crew id assigned by the adapter/db helper.
+    """
+    return db.save_crew(
+        office_id=ctx.office_id,
+        request_id=ctx.request_id,
+        member_ids=list(recommendation.member_ids),
+        rationale=_fold_rationale(recommendation),
+        estimated_cost=recommendation.total_cost,
+        source=ctx.source,
+        status=_CREW_PROPOSED,
+        crew_id=ctx.crew_id,
+    )
 
 
 def save_normal_proposal(recommendation: Recommendation, ctx: SaveContext) -> str:
@@ -154,10 +160,9 @@ def save_normal_proposal(recommendation: Recommendation, ctx: SaveContext) -> st
     Returns the ``crew_id`` (assigned by the db helper when ``ctx.crew_id`` is unset).
     Performs no worker state change, approval, or assignment (delegated to 담당자 A).
     """
-    from backend.shared import db  # lazy: real Layer in prod, installed stub in tests
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
 
-    crew_item = _build_crew_item(recommendation, ctx)
-    crew_id = db.save_crew(crew_item)
+    crew_id = _save_crew_via_adapter(db, recommendation, ctx)
     db.transition_request_status(ctx.request_id, _REQ_COMPOSING, _REQ_PROPOSED)
     return crew_id
 
@@ -174,10 +179,9 @@ def save_emergency_proposal(recommendation: Recommendation, ctx: SaveContext) ->
     Returns the ``crew_id`` (assigned by the db helper when ``ctx.crew_id`` is unset).
     Performs no worker state change, approval, or assignment (delegated to 담당자 A).
     """
-    from backend.shared import db  # lazy: real Layer in prod, installed stub in tests
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
 
-    crew_item = _build_crew_item(recommendation, ctx)
-    crew_id = db.save_crew(crew_item)
+    crew_id = _save_crew_via_adapter(db, recommendation, ctx)
     # Intentionally no WorkRequest transition and no GapEvent transition here.
     return crew_id
 

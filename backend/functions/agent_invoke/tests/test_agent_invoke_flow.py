@@ -1,49 +1,33 @@
 """Execution-flow unit tests for the agent_invoke Lambda handler (담당자 B, task 5.5).
 
 These are EXAMPLE / UNIT tests (plain pytest - no Hypothesis, no ``property`` marker).
-They exercise the control flow of ``backend/functions/agent_invoke/handler.py`` (task 5.3)
-end-to-end against the in-memory shared stubs installed under ``backend.shared.*`` via the
-``install_shared`` fixture (conftest.py), with the Bedrock ``compose`` call replaced by a
-deterministic fake so no live model is invoked.
+They exercise the control flow of ``backend/functions/agent_invoke/handler.py`` end-to-end
+against the in-memory ``FakeSharedDB`` that 담당자 B's code now reaches through the
+``shared_gateway`` adapter (installed by the ``install_shared`` fixture), with the Bedrock
+``compose`` call replaced by a deterministic fake so no live model is invoked.
 
-Concerns covered (one clearly-named test per concern; see tasks.md task 5.5)
----------------------------------------------------------------------------
-1. NORMAL / EMERGENCY routing + mode setting (external routes and the trusted internal
-   invoke).                                                        (Req 6.1, 6.2)
-2. Authorization path split - external vs internal:
-     (a) external/direct calls (API Gateway proxy events) from a non-OFFICE subject
-         (COMPANY / WORKER) trying to trigger the agent directly -> ``FORBIDDEN``;
-     (b) the trusted internal invoke that continues a COMPANY-registered gap flows
-         through WITHOUT a ``FORBIDDEN`` (the internal path never calls ``require_role``).
-                                                                    (Req 11.1, 11.2, 11.3, 11.4)
-3. State guard, per-path branching:
-     - NORMAL conditional-write failure -> ``STATE_CONFLICT``;      (Req 6.6, 6.7)
-     - EMERGENCY external ``eventId`` with no GapEvent -> ``GAP_EVENT_NOT_FOUND``; (Req 10.10)
-     - EMERGENCY external non-``DETECTED`` state (already RECOMPOSING/PROPOSED/FAILED) and
-       a duplicate recompose -> ``STATE_CONFLICT`` (no queueing);   (Req 6.6, 6.7)
-     - trusted internal invoke ACCEPTS an already-``RECOMPOSING`` GapEvent without a
-       conflict and does not (re)transition it.                     (Req 10.7)
-4. Save split - NORMAL uses ``save_normal_proposal`` (WorkRequest ``COMPOSING -> PROPOSED``);
-   EMERGENCY uses ``save_emergency_proposal`` (WorkRequest NOT transitioned). (Req 8.1, 8.2)
-5. EMERGENCY terminal-transition ownership - external/direct ``agent-recompose``:
-   ``compose_flow`` performs ``RECOMPOSING -> PROPOSED`` on save; trusted internal invoke:
-   agent_invoke does NOT transition the GapEvent (gap_event owns it).  (Req 10.7)
-6. Freshest snapshot - validation runs against the ``build_validation_context`` snapshot
-   (``get_workers`` is read immediately before validation and its result is injected, so a
-   FRESH value overrides the stale agent-input pool).                (Req 6.5 / 7.3, 7.6, 7.7)
+Post-checkpoint-2 reality
+-------------------------
+- **DB**: the ten high-level DB functions are monkeypatched onto ``FakeSharedDB`` via the
+  ``shared_gateway`` adapter (``install_shared``). The real ``backend.shared`` package stays
+  intact.
+- **Auth**: 담당자 B's handler consumes 담당자 A's REAL ``auth.get_principal`` +
+  ``Principal.require_role``, driven by claim-bearing API-Gateway events
+  (``requestContext.authorizer.claims`` with ``custom:role`` / ``custom:office_id``). A
+  non-OFFICE external caller yields a FORBIDDEN **proxy** error.
+- **Responses**: the handler returns API-Gateway proxy dicts (``{statusCode, headers,
+  body}``); the ``{success, data|error}`` envelope is JSON in ``body`` (parsed by
+  :func:`_body`).
 
-Note on scope vs. task text: the retry-exhausted EMERGENCY ``RECOMPOSING -> FAILED``
-transition mentioned in task 5.5 is wired in task 6.3 (retry / fallback / rollback), not in
-the 5.3 first-pass handler under test here (validation failure raises
-``AGENT_OUTPUT_INVALID`` with no save and no terminal transition). This file therefore
-asserts the terminal-transition OWNERSHIP that 5.3 implements - external success
-transitions ``RECOMPOSING -> PROPOSED``, internal never transitions - and leaves the
-FAILED-transition assertions to the 6.3/6.4 retry-fallback tests.
+Concerns covered (one clearly-named test per concern; see tasks.md task 5.5): routing +
+mode, external OFFICE gate vs. trusted-internal skip, per-path state guard, save split,
+EMERGENCY terminal-transition ownership, and the freshest-snapshot validation.
 
 Python 3.9: ``from __future__ import annotations`` keeps annotations lazy.
 """
 from __future__ import annotations
 
+import json
 from collections import Counter
 
 import pytest
@@ -65,6 +49,19 @@ from backend.functions.gap_event.emergency_payload import build_emergency_payloa
 OFFICE_ID = "OFFICE001"
 
 
+def _body(resp):
+    """Decode the ``{success, data|error}`` envelope from an API-Gateway proxy response."""
+    return json.loads(resp["body"])
+
+
+def _claims(role="OFFICE", office_id=OFFICE_ID, sub="user-1"):
+    """Cognito-style custom claims for an API-Gateway authorizer context."""
+    claims = {"sub": sub, "custom:role": role}
+    if office_id:
+        claims["custom:office_id"] = office_id
+    return claims
+
+
 # --------------------------------------------------------------------------- #
 # Fake compose functions (no live Bedrock)                                     #
 # --------------------------------------------------------------------------- #
@@ -74,12 +71,8 @@ def _valid_output_for(agent_input: AgentInput) -> AgentOutput:
     Produces ONE recommendation (rank 1) whose members exactly satisfy the request's
     required trade/headcount: every EMERGENCY ``fixed_members`` entry is kept, and the
     remaining per-trade shortage is filled from the candidate pool. ``total_cost`` is the
-    sum of the retained fixed-member wages plus the picked candidates' wages. Because the
-    tests seed the DB workers with the SAME wages/trades as this pool, the freshest
-    ``get_workers`` snapshot the validator uses matches this ``total_cost`` and the output
-    validates (Property 1-8). Deriving the output from the actual (possibly server-
-    assembled) ``agent_input`` lets the same fake serve NORMAL, EMERGENCY-external, and
-    EMERGENCY-internal flows.
+    sum of the retained fixed-member wages plus the picked candidates' wages, matching the
+    freshest ``get_workers`` snapshot the validator uses (tests seed matching wages).
     """
     required: Counter = Counter()
     for tr in agent_input.request.required_workers:
@@ -132,29 +125,40 @@ def _boom_compose(agent_input, *, timeout_s=None, agent=None):
 # --------------------------------------------------------------------------- #
 # Event / payload builders                                                     #
 # --------------------------------------------------------------------------- #
-def _normal_event(request_id="REQ1"):
+def _normal_event(request_id="REQ1", *, role="OFFICE", office_id=OFFICE_ID):
     """An API Gateway proxy event for ``POST .../requests/{requestId}/agent-compose``."""
     return {
         "resource": "/office/requests/{requestId}/agent-compose",
         "httpMethod": "POST",
-        "requestContext": {"requestId": "apigw-normal"},
+        "requestContext": {
+            "requestId": "apigw-normal",
+            "authorizer": {"claims": _claims(role, office_id)},
+        },
         "pathParameters": {"requestId": request_id},
     }
 
 
-def _recompose_event(event_id="GE1"):
+def _recompose_event(event_id="GE1", *, role="OFFICE", office_id=OFFICE_ID):
     """An API Gateway proxy event for ``POST .../gap-events/{eventId}/agent-recompose``."""
     return {
         "resource": "/office/gap-events/{eventId}/agent-recompose",
         "httpMethod": "POST",
-        "requestContext": {"requestId": "apigw-emergency"},
+        "requestContext": {
+            "requestId": "apigw-emergency",
+            "authorizer": {"claims": _claims(role, office_id)},
+        },
         "pathParameters": {"eventId": event_id},
     }
 
 
 def _internal_payload(agent_input, *, event_id="GE1", office_id=OFFICE_ID,
                       current_crew_id="CREW1"):
-    """gap_event's trusted internal invoke payload (a plain dict + marker, not an APIGW event)."""
+    """gap_event's trusted internal invoke payload (a plain dict + marker, no claims).
+
+    Deliberately carries NO authorizer claims: the internal path is IAM-trusted and never
+    calls ``get_principal`` (Req 11.3), so a claimless payload flowing through to success is
+    itself proof the OFFICE gate was skipped.
+    """
     return {
         handler.INTERNAL_INVOKE_MARKER: True,
         "mode": "EMERGENCY",
@@ -196,7 +200,7 @@ def _seed_normal(db, *, request_id="REQ1", status="REQUESTED", office_id=OFFICE_
         required_workers=[{"trade": "FORMWORK", "count": 2}],
         budget=1_000_000,
         priority={"cost": "HIGH", "skill": "MEDIUM", "teamwork": "LOW"},
-        site="현장 A",
+        site_name="현장 A",
         work_date="2025-01-01",
         start_time="08:00",
     )
@@ -216,7 +220,7 @@ def _seed_emergency(db, *, event_id="GE1", crew_id="CREW1", request_id="REQ_E",
         required_workers=[{"trade": "FORMWORK", "count": 2}],
         budget=1_000_000,
         priority={"cost": "HIGH", "skill": "MEDIUM", "teamwork": "LOW"},
-        site="현장 E",
+        site_name="현장 E",
         work_date="2025-01-02",
         start_time="07:00",
     )
@@ -231,8 +235,10 @@ def _seed_emergency(db, *, event_id="GE1", crew_id="CREW1", request_id="REQ_E",
              "state": "RUNNING"},
         ],
     )
+    # Real GapEvent schema names the departed workers ``missing_worker_ids`` and the kind
+    # ``gap_type``; seed both so the server-side external assembly reads them correctly.
     db.add_gap_event(event_id, status=gap_status, crew_id=crew_id,
-                     departed_ids=["F2"], type="NO_SHOW", office_id=office_id)
+                     missing_worker_ids=["F2"], gap_type="NO_SHOW", office_id=office_id)
     db.add_worker("F1", office_id=office_id, state="RUNNING", trade="FORMWORK",
                   desired_daily_wage=150_000, current_crew_id=crew_id,
                   skill_level=4, career_years=9)
@@ -272,12 +278,13 @@ def test_normal_route_runs_in_normal_mode_and_succeeds(install_shared, monkeypat
     monkeypatch.setattr(handler, "compose", _fake_compose)
 
     resp = handler.handler(_normal_event("REQ1"))
+    body = _body(resp)
 
-    assert resp["success"] is True
-    assert resp["data"]["mode"] == "NORMAL"
-    assert resp["data"]["request_id"] == "REQ1"
-    assert resp["data"]["crew_id"]  # a crew was persisted
-    assert len(resp["data"]["recommendations"]) == 1
+    assert body["success"] is True
+    assert body["data"]["mode"] == "NORMAL"
+    assert body["data"]["request_id"] == "REQ1"
+    assert body["data"]["crew_id"]  # a crew was persisted
+    assert len(body["data"]["recommendations"]) == 1
     assert len(db.saved_crews) == 1
 
 
@@ -288,10 +295,11 @@ def test_emergency_external_route_runs_in_emergency_mode(install_shared, monkeyp
     monkeypatch.setattr(handler, "compose", _fake_compose)
 
     resp = handler.handler(_recompose_event("GE1"))
+    body = _body(resp)
 
-    assert resp["success"] is True
-    assert resp["data"]["mode"] == "EMERGENCY"
-    assert resp["data"]["gap_event_id"] == "GE1"
+    assert body["success"] is True
+    assert body["data"]["mode"] == "EMERGENCY"
+    assert body["data"]["gap_event_id"] == "GE1"
     assert len(db.saved_crews) == 1
 
 
@@ -302,9 +310,10 @@ def test_internal_invoke_routes_to_emergency_mode(install_shared, monkeypatch):
     monkeypatch.setattr(handler, "compose", _fake_compose)
 
     resp = handler.handler(_internal_payload(_emergency_agent_input()))
+    body = _body(resp)
 
-    assert resp["success"] is True
-    assert resp["data"]["mode"] == "EMERGENCY"
+    assert body["success"] is True
+    assert body["data"]["mode"] == "EMERGENCY"
     assert len(db.saved_crews) == 1
 
 
@@ -315,17 +324,16 @@ def test_internal_invoke_routes_to_emergency_mode(install_shared, monkeypatch):
 def test_external_compose_rejects_non_office_with_forbidden(install_shared, monkeypatch, role):
     """External/direct agent-compose by a non-OFFICE subject is FORBIDDEN (no side effects)."""
     db = install_shared.db
-    install_shared.auth.role = role
     _seed_normal(db)
     monkeypatch.setattr(handler, "compose", _boom_compose)  # must not reach compose
 
-    resp = handler.handler(_normal_event("REQ1"))
+    resp = handler.handler(_normal_event("REQ1", role=role))
+    body = _body(resp)
 
-    assert resp["success"] is False
-    assert resp["error"]["code"] == "FORBIDDEN"
-    # The external OFFICE gate WAS applied, and nothing was written.
-    assert len(install_shared.auth.calls) == 1
-    assert install_shared.auth.calls[0]["roles"] == ["OFFICE"]
+    assert resp["statusCode"] == 403
+    assert body["success"] is False
+    assert body["error"]["code"] == "FORBIDDEN"
+    # The OFFICE gate rejected the caller and nothing was written.
     assert db.saved_crews == []
     assert db.status_transitions == []
     assert db.gap_status_transitions == []
@@ -334,14 +342,14 @@ def test_external_compose_rejects_non_office_with_forbidden(install_shared, monk
 def test_external_recompose_rejects_company_with_forbidden(install_shared, monkeypatch):
     """External/direct agent-recompose by a COMPANY subject is FORBIDDEN (Req 11.4)."""
     db = install_shared.db
-    install_shared.auth.role = "COMPANY"
     _seed_emergency(db)
     monkeypatch.setattr(handler, "compose", _boom_compose)
 
-    resp = handler.handler(_recompose_event("GE1"))
+    resp = handler.handler(_recompose_event("GE1", role="COMPANY"))
+    body = _body(resp)
 
-    assert resp["success"] is False
-    assert resp["error"]["code"] == "FORBIDDEN"
+    assert body["success"] is False
+    assert body["error"]["code"] == "FORBIDDEN"
     assert db.saved_crews == []
     assert db.gap_status_transitions == []  # rejected before the lock is acquired
 
@@ -349,22 +357,19 @@ def test_external_recompose_rejects_company_with_forbidden(install_shared, monke
 def test_internal_invoke_from_company_registered_gap_is_not_forbidden(install_shared, monkeypatch):
     """A COMPANY-registered gap's internal invoke proceeds WITHOUT a FORBIDDEN (Req 11.3).
 
-    The internal path never applies the OFFICE gate: even with the authenticated role set
-    to COMPANY (as it would be for a COMPANY-registered gap), the invoke flows through to a
-    saved proposal and ``require_role`` is never called (trust is IAM-enforced, not role-
-    checked on this path).
+    The internal payload carries NO claims; if the internal path had applied the OFFICE gate
+    (get_principal), a claimless event would raise UNAUTHORIZED. Flowing through to a saved
+    proposal proves the gate is skipped entirely on the trusted internal path.
     """
     db = install_shared.db
-    install_shared.auth.role = "COMPANY"
     _seed_internal_workers(db)
     monkeypatch.setattr(handler, "compose", _fake_compose)
 
     resp = handler.handler(_internal_payload(_emergency_agent_input()))
+    body = _body(resp)
 
-    assert resp["success"] is True  # NOT forbidden
+    assert body["success"] is True  # NOT forbidden / unauthorized
     assert len(db.saved_crews) == 1
-    # The internal path did not consult the OFFICE gate at all.
-    assert install_shared.auth.calls == []
 
 
 # =========================================================================== #
@@ -378,9 +383,10 @@ def test_normal_conditional_write_failure_returns_state_conflict(install_shared,
     monkeypatch.setattr(handler, "compose", _boom_compose)
 
     resp = handler.handler(_normal_event("REQ1"))
+    body = _body(resp)
 
-    assert resp["success"] is False
-    assert resp["error"]["code"] == "STATE_CONFLICT"
+    assert body["success"] is False
+    assert body["error"]["code"] == "STATE_CONFLICT"
     # The single (failed) transition attempt was recorded; nothing was saved.
     assert len(db.status_transitions) == 1
     assert db.status_transitions[0]["ok"] is False
@@ -393,9 +399,10 @@ def test_emergency_external_missing_gap_event_returns_not_found(install_shared, 
     monkeypatch.setattr(handler, "compose", _boom_compose)
 
     resp = handler.handler(_recompose_event("MISSING"))
+    body = _body(resp)
 
-    assert resp["success"] is False
-    assert resp["error"]["code"] == "GAP_EVENT_NOT_FOUND"
+    assert body["success"] is False
+    assert body["error"]["code"] == "GAP_EVENT_NOT_FOUND"
     # Not-found is reported BEFORE any lock attempt.
     assert db.gap_status_transitions == []
     assert db.saved_crews == []
@@ -409,9 +416,10 @@ def test_emergency_external_non_detected_state_returns_conflict(install_shared, 
     monkeypatch.setattr(handler, "compose", _boom_compose)
 
     resp = handler.handler(_recompose_event("GE1"))
+    body = _body(resp)
 
-    assert resp["success"] is False
-    assert resp["error"]["code"] == "STATE_CONFLICT"
+    assert body["success"] is False
+    assert body["error"]["code"] == "STATE_CONFLICT"
     # Exactly one (failed) DETECTED->RECOMPOSING attempt; nothing saved/re-transitioned.
     assert len(db.gap_status_transitions) == 1
     assert db.gap_status_transitions[0]["ok"] is False
@@ -427,19 +435,14 @@ def test_emergency_external_duplicate_recompose_returns_conflict(install_shared,
     first = handler.handler(_recompose_event("GE1"))
     second = handler.handler(_recompose_event("GE1"))
 
-    assert first["success"] is True  # first acquires the lock and completes
-    assert second["success"] is False
-    assert second["error"]["code"] == "STATE_CONFLICT"  # not queued - rejected
+    assert _body(first)["success"] is True  # first acquires the lock and completes
+    assert _body(second)["success"] is False
+    assert _body(second)["error"]["code"] == "STATE_CONFLICT"  # not queued - rejected
     assert len(db.saved_crews) == 1  # the duplicate saved nothing
 
 
 def test_internal_invoke_accepts_recomposing_without_conflict(install_shared, monkeypatch):
-    """Trusted internal invoke ACCEPTS an already-RECOMPOSING GapEvent and never conflicts.
-
-    gap_event has already acquired DETECTED->RECOMPOSING before invoking, so the GapEvent is
-    RECOMPOSING. The internal path treats that as the expected state, saves the proposal
-    without a STATE_CONFLICT, and does not (re)transition the GapEvent.
-    """
+    """Trusted internal invoke ACCEPTS an already-RECOMPOSING GapEvent and never conflicts."""
     db = install_shared.db
     _seed_internal_workers(db)
     db.add_gap_event("GE1", status="RECOMPOSING", crew_id="CREW1")
@@ -447,7 +450,7 @@ def test_internal_invoke_accepts_recomposing_without_conflict(install_shared, mo
 
     resp = handler.handler(_internal_payload(_emergency_agent_input()))
 
-    assert resp["success"] is True
+    assert _body(resp)["success"] is True
     assert len(db.saved_crews) == 1
     # No GapEvent transition performed by the internal path, and its status is unchanged.
     assert db.gap_status_transitions == []
@@ -465,7 +468,7 @@ def test_normal_save_transitions_work_request_to_proposed(install_shared, monkey
 
     resp = handler.handler(_normal_event("REQ1"))
 
-    assert resp["success"] is True
+    assert _body(resp)["success"] is True
     # Crew stored as a PROPOSED, AGENT-sourced proposal.
     assert len(db.saved_crews) == 1
     assert db.saved_crews[0]["status"] == "PROPOSED"
@@ -484,12 +487,15 @@ def test_emergency_external_save_does_not_transition_work_request(install_shared
     monkeypatch.setattr(handler, "compose", _fake_compose)
 
     resp = handler.handler(_recompose_event("GE1"))
+    body = _body(resp)
 
-    assert resp["success"] is True
+    assert body["success"] is True
     assert len(db.saved_crews) == 1
     assert db.saved_crews[0]["status"] == "PROPOSED"
     assert db.saved_crews[0]["source"] == "AGENT"
-    assert db.saved_crews[0]["gap_event_id"] == "GE1"
+    # Crew↔GapEvent linkage is surfaced in the RESPONSE (the canonical Crew schema has no
+    # gap field), not persisted on the Crew item.
+    assert body["data"]["gap_event_id"] == "GE1"
     # EMERGENCY must not touch the WorkRequest state machine (it may be RUNNING).
     assert db.status_transitions == []
     assert db.work_requests["REQ_E"]["status"] == "RUNNING"
@@ -503,7 +509,7 @@ def test_internal_invoke_save_does_not_transition_work_request(install_shared, m
 
     resp = handler.handler(_internal_payload(_emergency_agent_input()))
 
-    assert resp["success"] is True
+    assert _body(resp)["success"] is True
     assert len(db.saved_crews) == 1
     assert db.status_transitions == []  # no WorkRequest transition on the internal path
 
@@ -512,18 +518,14 @@ def test_internal_invoke_save_does_not_transition_work_request(install_shared, m
 # 5. EMERGENCY terminal-transition ownership (per path)                        #
 # =========================================================================== #
 def test_emergency_external_owns_recomposing_to_proposed_transition(install_shared, monkeypatch):
-    """External agent-recompose: compose_flow performs RECOMPOSING->PROPOSED on save (Req 10.7).
-
-    Because agent_invoke acquired the lock (DETECTED->RECOMPOSING) on this path, it owns the
-    terminal transition. Both transitions succeed and the GapEvent ends at PROPOSED.
-    """
+    """External agent-recompose: compose_flow performs RECOMPOSING->PROPOSED on save (Req 10.7)."""
     db = install_shared.db
     _seed_emergency(db)
     monkeypatch.setattr(handler, "compose", _fake_compose)
 
     resp = handler.handler(_recompose_event("GE1"))
 
-    assert resp["success"] is True
+    assert _body(resp)["success"] is True
     transitions = [(t["expected"], t["target"], t["ok"]) for t in db.gap_status_transitions]
     assert transitions == [
         ("DETECTED", "RECOMPOSING", True),   # entry lock (self-acquired)
@@ -541,7 +543,7 @@ def test_internal_invoke_does_not_transition_gap_event(install_shared, monkeypat
 
     resp = handler.handler(_internal_payload(_emergency_agent_input()))
 
-    assert resp["success"] is True
+    assert _body(resp)["success"] is True
     assert len(db.saved_crews) == 1
     # The terminal RECOMPOSING->PROPOSED transition is gap_event's responsibility, not ours.
     assert db.gap_status_transitions == []
@@ -552,20 +554,14 @@ def test_internal_invoke_does_not_transition_gap_event(install_shared, monkeypat
 # 6. Freshest snapshot (검증 직전 최신 스냅샷)                                    #
 # =========================================================================== #
 def test_normal_reads_fresh_snapshot_before_validation_and_save(install_shared, monkeypatch):
-    """get_workers is read for the recommended members and BEFORE the crew is saved.
-
-    The only DB read that feeds the validator is ``build_validation_context``'s
-    ``get_workers`` call, which happens immediately before ``validate_output`` and before
-    any persistence - so observing it precede ``save_crew`` (with the recommended member
-    ids) confirms validation ran against the freshest snapshot.
-    """
+    """get_workers is read for the recommended members and BEFORE the crew is saved."""
     db = install_shared.db
     _seed_normal(db)
     monkeypatch.setattr(handler, "compose", _fake_compose)
 
     resp = handler.handler(_normal_event("REQ1"))
 
-    assert resp["success"] is True
+    assert _body(resp)["success"] is True
     get_workers_calls = db.method_calls("get_workers")
     assert len(get_workers_calls) == 1
     assert get_workers_calls[0]["worker_ids"] == ["W1", "W2"]  # the recommended members
@@ -574,14 +570,7 @@ def test_normal_reads_fresh_snapshot_before_validation_and_save(install_shared, 
 
 
 def test_compose_flow_validates_against_freshest_snapshot_over_stale_pool(install_shared):
-    """The injected fresh snapshot (get_workers) - not the stale agent-input pool - drives validity.
-
-    The candidate pool carries a STALE wage (100_000) while the DB (get_workers) holds the
-    FRESH wage (175_000). An output whose ``total_cost`` matches the FRESH wage validates and
-    saves; one that matches the STALE pool wage is rejected as AGENT_OUTPUT_INVALID with no
-    save. This proves ``build_validation_context``'s get_workers result is what the validator
-    uses.
-    """
+    """The injected fresh snapshot (get_workers) - not the stale agent-input pool - drives validity."""
     db = install_shared.db
     db.add_worker("N1", office_id=OFFICE_ID, state="READY", trade="FORMWORK",
                   desired_daily_wage=175_000, current_crew_id=None,
@@ -613,7 +602,7 @@ def test_compose_flow_validates_against_freshest_snapshot_over_stale_pool(instal
 
     resp = handler.compose_flow(agent_input, save_ctx, path=handler._PATH_EXTERNAL,
                                 compose_fn=_fresh_valued)
-    assert resp["success"] is True
+    assert _body(resp)["success"] is True
     assert len(db.saved_crews) == 1
     # The fresh read was for the recommended member only.
     assert db.method_calls("get_workers")[0]["worker_ids"] == ["N1"]

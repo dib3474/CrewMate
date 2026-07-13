@@ -62,9 +62,29 @@ def fake_db():
     return shared_stubs.FakeSharedDB()
 
 
+class _InstalledShared:
+    """Return value of the :func:`install_shared` fixture.
+
+    Exposes the in-memory ``db`` (a :class:`~tests.mocks.shared_stubs.FakeSharedDB`) that
+    담당자 B's code now reaches through the ``shared_gateway`` adapter. Auth is NOT stubbed
+    here: 담당자 B's handlers consume the REAL ``backend.shared.auth.get_principal``, so tests
+    drive authorization by passing claim-bearing API-Gateway events (see the per-file event
+    builders), and ``backend.shared.responses`` stays real (handlers return proxy responses).
+    """
+
+    def __init__(self, db):
+        self.db = db
+
+
 @pytest.fixture
 def install_shared(monkeypatch):
-    """Install the shared stubs under ``backend.shared.*`` and return them.
+    """Redirect 담당자 B's high-level DB contract onto an in-memory ``FakeSharedDB``.
+
+    Monkeypatches the ``backend.functions.agent_invoke.shared_gateway`` adapter's ten
+    high-level functions onto a fresh ``FakeSharedDB`` (via
+    :func:`tests.mocks.shared_stubs.install_fake_db`). Both Lambdas import the adapter as
+    ``db``, so they share ONE fake instance and observe consistent state. The real
+    ``backend.shared`` package is left intact (auth + responses stay real).
 
     Usage::
 
@@ -72,4 +92,5 @@ def install_shared(monkeypatch):
             install_shared.db.add_work_request("REQ1", status="REQUESTED")
             ...
     """
-    return shared_stubs.install_shared_stubs(monkeypatch)
+    fake = shared_stubs.install_fake_db(monkeypatch)
+    return _InstalledShared(db=fake)

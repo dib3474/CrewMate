@@ -96,6 +96,7 @@ def resolve_db(db: Any = None) -> Any:
     """
     if db is not None:
         return db
-    from backend.shared import db as shared_db  # lazy by design; 담당자 A owns this
+    # High-level adapter over 담당자 A's real backend.shared.* (imported lazily by design).
+    from backend.functions.agent_invoke import shared_gateway as shared_db
 
     return shared_db

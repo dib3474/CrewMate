@@ -332,16 +332,41 @@ class FakeSharedDB:
         return copy.deepcopy(item) if item is not None else None
 
     # --- write / transition helpers ---------------------------------------- #
-    def save_crew(self, crew_item: dict) -> str:
-        item = copy.deepcopy(crew_item)
-        crew_id = item.get("crew_id")
-        if not crew_id:
-            crew_id = f"CREW#{len(self.crews) + 1}"
-            item["crew_id"] = crew_id
-        self.crews[crew_id] = item
+    def save_crew(
+        self,
+        *,
+        office_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        member_ids: Optional[Iterable[str]] = None,
+        rationale: str = "",
+        estimated_cost: Optional[int] = None,
+        source: str = Source.AGENT,
+        status: Optional[str] = None,
+        crew_id: Optional[str] = None,
+    ) -> str:
+        """Persist a Crew via the high-level kwargs contract (mirrors ``shared_gateway.save_crew``).
+
+        Builds the canonical Crew shape ``schemas.build_crew`` produces (``member_ids`` /
+        ``status`` / ``source`` / ``rationale`` / ``estimated_cost`` + office/request linkage);
+        defaults ``status`` to ``PROPOSED`` exactly as the adapter does. There is intentionally
+        no ``gap_event_id`` / ``current_crew_id`` / ``rank`` / ``total_cost`` field — the
+        canonical schema has none (the linkage lives only in the agent_invoke response).
+        """
+        cid = crew_id or f"CREW#{len(self.crews) + 1}"
+        item = {
+            "crew_id": cid,
+            "office_id": office_id,
+            "request_id": request_id,
+            "member_ids": list(member_ids or []),
+            "status": status or CrewStatus.PROPOSED,
+            "source": source,
+            "rationale": rationale,
+            "estimated_cost": estimated_cost,
+        }
+        self.crews[cid] = item
         self.saved_crews.append(item)
-        self.calls.append({"method": "save_crew", "crew_id": crew_id})
-        return crew_id
+        self.calls.append({"method": "save_crew", "crew_id": cid})
+        return cid
 
     def transition_request_status(
         self, request_id: str, expected: str, target: str
@@ -361,16 +386,37 @@ class FakeSharedDB:
             req["status"] = target
         return succeeded
 
-    def save_gap_event(self, gap_item: dict) -> str:
-        item = copy.deepcopy(gap_item)
-        event_id = item.get("event_id")
-        if not event_id:
-            event_id = f"GAP#{len(self.gap_events) + 1}"
-            item["event_id"] = event_id
-        self.gap_events[event_id] = item
+    def save_gap_event(
+        self,
+        *,
+        office_id: Optional[str] = None,
+        crew_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        gap_type: Optional[str] = None,
+        missing_worker_ids: Optional[Iterable[str]] = None,
+        status: Optional[str] = None,
+        event_id: Optional[str] = None,
+    ) -> str:
+        """Persist a GapEvent via the high-level kwargs contract (mirrors ``shared_gateway``).
+
+        Builds the canonical GapEvent shape ``schemas.build_gap_event`` produces: the real
+        schema names the gap kind ``gap_type`` (not ``type``) and the departed workers
+        ``missing_worker_ids`` (not ``departed_ids``). Defaults ``status`` to ``DETECTED``.
+        """
+        eid = event_id or f"GAP#{len(self.gap_events) + 1}"
+        item = {
+            "event_id": eid,
+            "office_id": office_id,
+            "crew_id": crew_id,
+            "request_id": request_id,
+            "gap_type": gap_type,
+            "missing_worker_ids": list(missing_worker_ids or []),
+            "status": status or GapStatus.DETECTED,
+        }
+        self.gap_events[eid] = item
         self.saved_gap_events.append(item)
-        self.calls.append({"method": "save_gap_event", "event_id": event_id})
-        return event_id
+        self.calls.append({"method": "save_gap_event", "event_id": eid})
+        return eid
 
     def transition_gap_event_status(
         self, event_id: str, expected: str, target: str
@@ -483,3 +529,28 @@ def install_shared_stubs(monkeypatch, stubs: Optional[SharedStubs] = None) -> Sh
     monkeypatch.setitem(sys.modules, "backend.shared.state", state_mod)
     monkeypatch.setitem(sys.modules, "backend.shared.response", response_mod)
     return stubs
+
+
+def install_fake_db(monkeypatch, fake: Optional[FakeSharedDB] = None) -> FakeSharedDB:
+    """Redirect 담당자 B's high-level DB contract onto an in-memory :class:`FakeSharedDB`.
+
+    담당자 B's code now consumes the real ``backend/shared/*`` low-level API through the
+    ADAPTER ``backend.functions.agent_invoke.shared_gateway`` (imported at call sites as
+    ``db``). This helper monkeypatches the adapter's ten high-level module-level functions
+    (``get_work_request`` … ``transition_gap_event_status``) onto ``fake``'s methods, so the
+    handler / flow / assembler / gap tests exercise 담당자 B's real logic against the
+    in-memory fake with the SAME high-level contract — WITHOUT shadowing the real
+    ``backend.shared`` package (so ``backend.shared.auth`` / ``responses`` stay REAL, driven
+    by claim-bearing events).
+
+    Returns the (new or supplied) ``FakeSharedDB`` for seeding and side-effect assertions
+    (``saved_crews`` / ``saved_gap_events`` / ``status_transitions`` / ``gap_status_transitions``).
+    Uses pytest's ``monkeypatch`` so the adapter functions are restored automatically at
+    teardown.
+    """
+    from backend.functions.agent_invoke import shared_gateway
+
+    fake = fake or FakeSharedDB()
+    for name in _DB_CONTRACT_METHODS:
+        monkeypatch.setattr(shared_gateway, name, getattr(fake, name))
+    return fake

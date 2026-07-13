@@ -210,7 +210,9 @@ def _build_request_spec(record: Mapping[str, Any], request_id: str) -> RequestSp
         required_workers=required_workers,
         budget=_as_int(record.get("budget"), _DEFAULT_BUDGET),
         priority=_coerce_priority(record.get("priority")),
-        site=str(record.get("site") or ""),
+        # The real WorkRequest schema stores the site under ``site_name`` (담당자 A); fall
+        # back to ``site`` (and then "") defensively for the in-memory fake / lean records.
+        site=str(record.get("site_name") or record.get("site") or ""),
         work_date=str(record.get("work_date") or ""),
         start_time=str(record.get("start_time") or ""),
     )
@@ -266,7 +268,7 @@ def assemble_normal_input(request_id: str, office_id: str) -> AgentInput:
     handler's ``REQUESTED → COMPOSING`` conditional transition runs first and already
     proves existence, so this is a defensive guard.)
     """
-    from backend.shared import db  # lazy: real Layer in prod, installed stub in tests
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter over 담당자 A's backend.shared
 
     record = db.get_work_request(request_id)
     if record is None:
@@ -334,7 +336,7 @@ def build_validation_context(
     ``trade_headcount`` (Property 4) use server-side truth (see module docstring). A
     recommended worker missing from the fresh read gets no snapshot and thus fails closed.
     """
-    from backend.shared import db  # lazy: real Layer in prod, installed stub in tests
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter over 담당자 A's backend.shared
 
     member_ids = _dedupe(output_member_ids)
     fresh_records = db.get_workers(member_ids)  # FRESHEST snapshot, just before validation

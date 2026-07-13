@@ -56,8 +56,9 @@ gap_event invokes agent_invoke synchronously with a JSON-serializable dict::
 Authorization - external OFFICE gate vs. trusted internal path (Req 11)
 -----------------------------------------------------------------------
 - External/direct routes (both ``agent-compose`` and ``agent-recompose``) call
-  ``shared/auth.require_role(OFFICE)``. A non-OFFICE subject (notably COMPANY) trying to
-  trigger the agent DIRECTLY is rejected with ``FORBIDDEN`` (Req 11.1, 11.2, 11.4).
+  ``shared/auth.get_principal(event)`` then ``Principal.require_role(OFFICE)``. A non-OFFICE
+  subject (notably COMPANY) trying to trigger the agent DIRECTLY raises ``responses.ApiError``
+  (FORBIDDEN), returned as a proxy error at the handler boundary (Req 11.1, 11.2, 11.4).
 - The trusted internal invoke does NOT re-apply the OFFICE gate (Req 11.3): gap_event
   already authenticated the gap registrant (COMPANY *or* OFFICE), and the emergency
   recomposition is a continuation of that authenticated flow - so a COMPANY-registered
@@ -399,25 +400,21 @@ def _path_param(event: Dict[str, Any], name: str) -> str:
 # --------------------------------------------------------------------------- #
 # Authorization                                                                #
 # --------------------------------------------------------------------------- #
-def _require_office(event: Any) -> Dict[str, Any]:
-    """Apply the external OFFICE-only gate; map the auth ForbiddenError to FORBIDDEN.
+def _require_office(event: Any) -> "Principal":
+    """Apply the external OFFICE-only gate and return the authenticated principal.
 
-    Consumes ``shared/auth.require_role(event, [OFFICE])``. A non-OFFICE subject raises the
-    auth helper's ForbiddenError, which is translated to a ``_FlowError(FORBIDDEN)`` so the
-    handler returns a FORBIDDEN response (Req 11.2, 11.4). Any non-forbidden exception
-    propagates unchanged. This gate is applied ONLY on the external API Gateway routes; the
-    trusted internal invoke deliberately skips it (Req 11.3).
+    Consumes 담당자 A's real ``shared/auth.get_principal(event)`` +
+    ``Principal.require_role(OFFICE)``. Both raise ``responses.ApiError``
+    (UNAUTHORIZED / FORBIDDEN) which propagates to the top-level handler and is converted to
+    the matching proxy error response (Req 11.2, 11.4). This gate is applied ONLY on the
+    external API Gateway routes; the trusted internal invoke deliberately skips it (Req 11.3).
+    Callers read ``principal.office_id`` (an attribute) for the office linkage.
     """
-    from backend.shared import auth  # lazy: real Layer in prod, installed stub in tests
+    from backend.shared import auth  # lazy: real Layer in prod
 
-    forbidden_type = getattr(auth, "ForbiddenError", None)
-    try:
-        identity = auth.require_role(event, [_ROLE_OFFICE])
-    except Exception as exc:  # noqa: BLE001 - re-raise non-forbidden as-is (below)
-        if forbidden_type is not None and isinstance(exc, forbidden_type):
-            raise _FlowError(_ERR_FORBIDDEN, getattr(exc, "message", str(exc))) from exc
-        raise
-    return identity if isinstance(identity, dict) else {}
+    principal = auth.get_principal(event)
+    principal.require_role(_ROLE_OFFICE)
+    return principal
 
 
 # --------------------------------------------------------------------------- #
@@ -452,8 +449,12 @@ def _extract_active_members(crew: Dict[str, Any]) -> List[Member]:
 
 
 def _extract_departed_ids(gap: Dict[str, Any]) -> List[str]:
-    """Extract the departed-worker ids from the GapEvent (tolerant of key naming)."""
-    for key in ("departed_ids", "departed_worker_ids", "departed"):
+    """Extract the departed-worker ids from the GapEvent (tolerant of key naming).
+
+    The real GapEvent schema stores the departed workers under ``missing_worker_ids``; the
+    legacy/alternate keys are kept as defensive fallbacks so either shape is accepted.
+    """
+    for key in ("missing_worker_ids", "departed_ids", "departed_worker_ids", "departed"):
         value = gap.get(key)
         if value:
             return list(value)
@@ -484,7 +485,7 @@ def _assemble_emergency_input(
     Returns ``(agent_input, crew_id)``; ``crew_id`` becomes the SaveContext
     ``current_crew_id`` (the re-composition target the validator's conflict check exempts).
     """
-    from backend.shared import db  # lazy: real Layer in prod, installed stub in tests
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
 
     crew_id = gap.get("crew_id")
     crew = db.get_crew(crew_id) if crew_id else None
@@ -597,7 +598,7 @@ def _persist_and_finalize(
           external route);
         * trusted internal invoke -> gap_event owns it (task 8.5); do nothing here.
     """
-    from backend.shared import db  # lazy: real Layer in prod, installed stub in tests
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
 
     recommendation = _select_recommendation(output)
     if save_ctx.mode == _MODE_NORMAL:
@@ -675,7 +676,7 @@ def compose_flow(
     this function's ``AGENT_OUTPUT_INVALID`` to decide whether to retry, so extending 6.3 did
     not restructure this working single attempt.
     """
-    from backend.shared import response  # lazy: real Layer in prod, installed stub in tests
+    from backend.shared import responses  # lazy: real Layer in prod
 
     active_compose = compose_fn if compose_fn is not None else compose
     use_fallback = _resolve_fallback_enabled(fallback_enabled)
@@ -746,7 +747,7 @@ def compose_flow(
     }
     if save_ctx.gap_event_id is not None:
         data["gap_event_id"] = save_ctx.gap_event_id
-    return response.ok(data)
+    return responses.success(data)
 
 
 # --------------------------------------------------------------------------- #
@@ -772,7 +773,7 @@ def _apply_failure_cleanup(
       the GapEvent. gap_event sees the AGENT_RETRY_FAILED response and performs its own FAILED
       transition.
     """
-    from backend.shared import db  # lazy: real Layer in prod, installed stub in tests
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
 
     if save_ctx.mode == _MODE_NORMAL:
         # NORMAL rollback so the office can compose manually (Req 9.2).
@@ -944,9 +945,9 @@ def compose_flow_with_retry(
 # --------------------------------------------------------------------------- #
 def _handle_normal(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
     """NORMAL (external ``agent-compose``): OFFICE gate -> lock -> assemble -> compose_flow."""
-    from backend.shared import db  # lazy: real Layer in prod, installed stub in tests
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
 
-    identity = _require_office(event)  # FORBIDDEN if not OFFICE (Req 11.1, 11.2)
+    principal = _require_office(event)  # FORBIDDEN if not OFFICE (Req 11.1, 11.2)
 
     # State guard: acquire the REQUESTED -> COMPOSING lock (Req 6.6/6.7). A failed
     # conditional write (wrong state / concurrent duplicate / missing request) -> conflict.
@@ -956,7 +957,7 @@ def _handle_normal(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
             f"work request {request_id!r} not in {_REQ_REQUESTED} (already composing?)",
         )
 
-    office_id = identity.get("office_id")
+    office_id = principal.office_id
     if not office_id:
         record = db.get_work_request(request_id)
         office_id = (record or {}).get("office_id")
@@ -973,9 +974,9 @@ def _handle_normal(event: Dict[str, Any], request_id: str) -> Dict[str, Any]:
 def _handle_emergency_external(event: Dict[str, Any], event_id: str) -> Dict[str, Any]:
     """EMERGENCY external ``agent-recompose``: OFFICE gate -> not-found -> self-lock ->
     server-side payload assembly -> compose_flow (which owns the terminal transition)."""
-    from backend.shared import db  # lazy: real Layer in prod, installed stub in tests
+    from backend.functions.agent_invoke import shared_gateway as db  # high-level adapter
 
-    identity = _require_office(event)  # FORBIDDEN if not OFFICE (Req 11.1, 11.2, 11.4)
+    principal = _require_office(event)  # FORBIDDEN if not OFFICE (Req 11.1, 11.2, 11.4)
 
     # 1. GapEvent existence (Req 10.10). Looked up BEFORE the lock so a genuine miss is
     #    reported distinctly from a state conflict.
@@ -992,7 +993,7 @@ def _handle_emergency_external(event: Dict[str, Any], event_id: str) -> Dict[str
         )
 
     # 3. Server-side EMERGENCY payload assembly (do NOT trust the client body).
-    office_id = identity.get("office_id")
+    office_id = principal.office_id
     agent_input, crew_id = _assemble_emergency_input(gap, office_id)
 
     save_ctx = SaveContext(
@@ -1055,10 +1056,12 @@ def handler(event: Any, context: Any = None) -> Dict[str, Any]:
     Routing (see module docstring): a trusted internal invoke (plain dict + marker) ->
     EMERGENCY internal path; otherwise an API Gateway proxy event -> NORMAL
     (``agent-compose``) or EMERGENCY external (``agent-recompose``). Every mapped failure
-    is raised internally as a ``_FlowError`` and converted here to a single
-    ``response.error(code, message)``; success paths return ``response.ok(...)``.
+    is raised internally as a ``_FlowError`` (the internal flow codes) or, from the auth
+    gate, as 담당자 A's ``responses.ApiError`` (UNAUTHORIZED / FORBIDDEN); both are converted
+    here to a single proxy error response. Success paths return ``responses.success(...)``.
     """
-    from backend.shared import response  # lazy: real Layer in prod, installed stub in tests
+    from backend.shared import responses  # lazy: real Layer in prod
+    from backend.shared.responses import ApiError
 
     try:
         if _is_internal_invoke(event):
@@ -1068,4 +1071,7 @@ def handler(event: Any, context: Any = None) -> Dict[str, Any]:
             return _handle_normal(event, _path_param(event, "requestId"))
         return _handle_emergency_external(event, _path_param(event, "eventId"))
     except _FlowError as exc:
-        return response.error(exc.code, exc.message)
+        return responses.error(exc.code, exc.message)
+    except ApiError as exc:
+        # Auth gate (get_principal / require_role) raises this — return its proxy response.
+        return exc.to_response()
