@@ -22,7 +22,9 @@ class Principal:
     role: str             # WORKER / OFFICE / COMPANY
     office_id: str | None = None
     company_id: str | None = None
+    region: str | None = None
     username: str | None = None
+    name: str | None = None
 
     def require_role(self, *roles: str) -> None:
         """지정한 역할이 아니면 FORBIDDEN."""
@@ -71,12 +73,16 @@ def get_principal(event: dict[str, Any]) -> Principal:
 
     office_id = claims.get("custom:office_id") or claims.get("office_id")
     company_id = claims.get("custom:company_id") or claims.get("company_id")
+    region = claims.get("custom:region") or claims.get("region")
     username = claims.get("cognito:username") or claims.get("username")
+    name = claims.get("name")
 
     return Principal(
         user_id=user_id,
         role=role,
         office_id=office_id or None,
         company_id=company_id or None,
+        region=region or None,
         username=username,
+        name=name,
     )

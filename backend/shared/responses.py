@@ -29,6 +29,9 @@ class ErrorCode:
     AGENT_RETRY_FAILED = "AGENT_RETRY_FAILED"
     STATE_CONFLICT = "STATE_CONFLICT"
     GAP_EVENT_NOT_FOUND = "GAP_EVENT_NOT_FOUND"
+    # 인증/가입 (계약 v2 — 프론트 mock 사용 코드)
+    INVALID_INPUT = "INVALID_INPUT"
+    USERNAME_TAKEN = "USERNAME_TAKEN"
     # 입력 검증용 일반 오류 (계약 목록 외 내부용)
     VALIDATION_ERROR = "VALIDATION_ERROR"
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -48,6 +51,8 @@ _STATUS_BY_CODE: dict[str, int] = {
     ErrorCode.CREW_INVALID: 422,
     ErrorCode.AGENT_OUTPUT_INVALID: 422,
     ErrorCode.AGENT_RETRY_FAILED: 502,
+    ErrorCode.INVALID_INPUT: 400,
+    ErrorCode.USERNAME_TAKEN: 409,
     ErrorCode.VALIDATION_ERROR: 400,
     ErrorCode.INTERNAL_ERROR: 500,
 }

@@ -96,7 +96,7 @@ def resolve_db(db: Any = None) -> Any:
     """
     if db is not None:
         return db
-    # High-level adapter over 담당자 A's real shared.* (imported lazily by design).
-    from functions.agent_invoke import shared_gateway as shared_db
+    # 계약 v2: 공용 엔터티별 테이블 read 헬퍼 (지연 임포트).
+    from shared import db as shared_db
 
     return shared_db

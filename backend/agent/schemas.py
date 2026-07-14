@@ -40,6 +40,7 @@ __all__ = [
     "FixedMember",
     "CollaborationPair",
     "AgentInput",
+    "RecommendedMember",
     "Recommendation",
     "AgentOutput",
 ]
@@ -88,10 +89,11 @@ class RequestSpec(_StrictModel):
 
 
 class Candidate(_StrictModel):
-    """A READY candidate worker eligible for composition."""
+    """A READY candidate worker eligible for composition (계약 v2)."""
 
     worker_id: str
-    trade: str
+    preferred_trades: list[str] = []
+    excluded_trades: list[str] = []
     skill_level: int = Field(ge=1, le=5)  # 1 ~ 5
     desired_daily_wage: int = Field(gt=0)
     certifications: list[str] = []
@@ -99,11 +101,11 @@ class Candidate(_StrictModel):
 
 
 class FixedMember(_StrictModel):
-    """A retained RUNNING member kept in place during EMERGENCY re-composition."""
+    """A retained member kept in place during EMERGENCY re-composition."""
 
     worker_id: str
-    trade: str
-    desired_daily_wage: int = Field(gt=0)  # total_cost 계산 일관성을 위해 포함
+    assigned_trade: str
+    offered_wage: int = Field(gt=0)  # total_cost 계산 일관성을 위해 포함
 
 
 class CollaborationPair(_StrictModel):
@@ -131,14 +133,26 @@ class AgentInput(_StrictModel):
 # --------------------------------------------------------------------------- #
 # Agent output schema (design.md → "Agent 출력 스키마")                         #
 # --------------------------------------------------------------------------- #
+class RecommendedMember(_StrictModel):
+    """One assigned member in a recommendation (계약 v2: assigned_trade 포함)."""
+
+    worker_id: str
+    assigned_trade: str
+    offered_wage: int = Field(gt=0)
+
+
 class Recommendation(_StrictModel):
     """One crew recommendation produced by the Agent."""
 
     rank: int
-    member_ids: list[str]
+    members: list[RecommendedMember]
     total_cost: int
     reason: str
     considerations: list[str]
+
+    @property
+    def member_ids(self) -> list[str]:
+        return [m.worker_id for m in self.members]
 
 
 class AgentOutput(_StrictModel):

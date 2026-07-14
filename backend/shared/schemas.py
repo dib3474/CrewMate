@@ -1,9 +1,14 @@
-"""엔터티 검증/직렬화 헬퍼 (공유 계약 1.4 / 1.5).
+"""엔터티 빌더/직렬화 헬퍼 (계약 v2).
 
-- 아이템 빌더: Worker / WorkRequest / Crew / GapEvent / Notification / Collaboration
-- 검증: trade/skill_level/필수 필드
-- 뷰 필터: COMPANY 응답에서 내부 데이터(no_show_count 등) 제거
-- 유틸: UUID, ISO8601 timestamp, float -> Decimal 변환
+- 아이템 빌더: Worker / Office / Company / Request / Crew / Assignment / GapEvent / Notification
+- 뷰 필터: 역할별 응답에서 내부/성실도 데이터 노출 통제
+- 유틸: UUID, ISO8601 timestamp, float -> Decimal 변환, 본문 파싱
+
+성실도 노출 규칙 (README §4 / PROMPT §3):
+- completed_count / dispatched_count 원시값만 저장.
+- OFFICE 응답에만 두 카운트를 포함한다.
+- WORKER 본인 응답·COMPANY 응답에는 포함하지 않는다.
+- no_show_count 등 부정 라벨 필드는 저장·반환하지 않는다.
 """
 
 from __future__ import annotations
@@ -15,27 +20,29 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .db import (
-    company_gsi2pk,
     crew_gsi1sk,
-    crew_pk,
     gap_gsi1sk,
-    gap_pk,
-    office_gsi1pk,
+    notification_sk,
     request_gsi1sk,
-    request_pk,
-    user_pk,
     worker_gsi1sk,
-    worker_pk,
 )
 from .responses import ApiError, ErrorCode
-from .state import CrewStatus, GapStatus, ItemType, RequestStatus, Trade, WorkerState
+from .state import (
+    Acceptance,
+    CrewStatus,
+    GapStatus,
+    RequestStatus,
+    Trade,
+    WorkerState,
+)
 
 
 # ---------------------------------------------------------------------------
 # 유틸
 # ---------------------------------------------------------------------------
-def new_id() -> str:
-    return str(uuid.uuid4())
+def new_id(prefix: str = "") -> str:
+    uid = str(uuid.uuid4())
+    return f"{prefix}{uid}" if prefix else uid
 
 
 def now_iso() -> str:
@@ -53,8 +60,18 @@ def to_decimal(value: Any) -> Any:
     return value
 
 
+def clean(value: Any) -> Any:
+    """DynamoDB Decimal을 JSON 친화적인 int/float로 되돌린다 (응답 직렬화용)."""
+    if isinstance(value, decimal.Decimal):
+        return int(value) if value % 1 == 0 else float(value)
+    if isinstance(value, list):
+        return [clean(v) for v in value]
+    if isinstance(value, dict):
+        return {k: clean(v) for k, v in value.items()}
+    return value
+
+
 def parse_body(event: dict[str, Any]) -> dict[str, Any]:
-    """API Gateway 이벤트 본문을 dict로 파싱한다."""
     raw = event.get("body")
     if raw is None or raw == "":
         return {}
@@ -80,6 +97,16 @@ def validate_trade(trade: str) -> None:
         raise ApiError(ErrorCode.VALIDATION_ERROR, f"알 수 없는 직종입니다: {trade}")
 
 
+def validate_trades(trades: Any, field: str) -> list[str]:
+    if trades is None:
+        return []
+    if not isinstance(trades, list):
+        raise ApiError(ErrorCode.VALIDATION_ERROR, f"{field}는 배열이어야 합니다.")
+    for t in trades:
+        validate_trade(t)
+    return list(trades)
+
+
 def validate_skill_level(level: Any) -> int:
     try:
         level_int = int(level)
@@ -91,16 +118,17 @@ def validate_skill_level(level: Any) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Worker 아이템 빌더
+# Worker
+#   주민등록번호 필드는 어떤 형태로도 추가하지 않는다.
 # ---------------------------------------------------------------------------
-# 주민등록번호 필드는 어떤 형태로도 추가하지 않는다 (공유 계약 / 금지 사항 7).
 def build_worker(
     *,
     user_id: str,
     name: str,
     phone: str,
     office_id: str,
-    trade: str,
+    preferred_trades: list[str],
+    excluded_trades: list[str],
     skill_level: int,
     career_years: int,
     age: int,
@@ -110,25 +138,21 @@ def build_worker(
     worker_id: str | None = None,
     state: str = WorkerState.INACTIVE,
     completed_count: int = 0,
-    no_show_count: int = 0,
+    dispatched_count: int = 0,
 ) -> dict[str, Any]:
-    validate_trade(trade)
     skill_level = validate_skill_level(skill_level)
     wid = worker_id or new_id()
     ts = now_iso()
     item = {
-        "PK": worker_pk(wid),
-        "SK": "PROFILE",
-        "GSI1PK": office_gsi1pk(office_id),
-        "GSI1SK": worker_gsi1sk(state, wid),
-        "item_type": ItemType.WORKER,
         "worker_id": wid,
         "user_id": user_id,
         "name": name,
         "phone": phone,
         "office_id": office_id,
+        "gsi1sk": worker_gsi1sk(state, wid),
         "state": state,
-        "trade": trade,
+        "preferred_trades": preferred_trades,
+        "excluded_trades": excluded_trades,
         "skill_level": skill_level,
         "career_years": career_years,
         "age": age,
@@ -136,8 +160,9 @@ def build_worker(
         "desired_daily_wage": desired_daily_wage,
         "certifications": certifications or [],
         "completed_count": completed_count,
-        "no_show_count": no_show_count,
+        "dispatched_count": dispatched_count,
         "current_crew_id": None,
+        "current_offer": None,
         "state_changed_at": ts,
         "created_at": ts,
         "updated_at": ts,
@@ -145,29 +170,98 @@ def build_worker(
     return to_decimal(item)
 
 
-# COMPANY 응답 및 Agent 추천 사유에 노출 금지인 내부 필드
-_WORKER_INTERNAL_FIELDS = frozenset(
-    {"no_show_count", "phone", "user_id", "age", "PK", "SK", "GSI1PK", "GSI1SK"}
-)
+_WORKER_INTERNAL_KEYS = frozenset({"gsi1sk"})
+_WORKER_INTEGRITY_KEYS = frozenset({"completed_count", "dispatched_count"})
+
+
+def worker_office_view(worker: dict[str, Any], work_history: list | None = None) -> dict[str, Any]:
+    """OFFICE 응답용: 성실도 카운트 포함, 내부 GSI 키만 제거."""
+    view = {k: clean(v) for k, v in worker.items() if k not in _WORKER_INTERNAL_KEYS}
+    view["work_history"] = clean(work_history or [])
+    return view
+
+
+def worker_self_view(worker: dict[str, Any], work_history: list | None = None) -> dict[str, Any]:
+    """WORKER 본인 응답용: 성실도 카운트 제외 (인력사무소 한정 노출 규칙)."""
+    view = {
+        k: clean(v)
+        for k, v in worker.items()
+        if k not in _WORKER_INTERNAL_KEYS and k not in _WORKER_INTEGRITY_KEYS
+    }
+    view["work_history"] = clean(work_history or [])
+    return view
 
 
 def worker_public_view(worker: dict[str, Any]) -> dict[str, Any]:
-    """COMPANY 응답용: 내부/부정 데이터 제거 (name, trade, skill_level 위주)."""
+    """COMPANY/타 근로자 응답용: 성실도·연락처 등 제외."""
     return {
         "worker_id": worker.get("worker_id"),
         "name": worker.get("name"),
-        "trade": worker.get("trade"),
-        "skill_level": worker.get("skill_level"),
+        "skill_level": clean(worker.get("skill_level")),
+        "preferred_trades": clean(worker.get("preferred_trades") or []),
     }
 
 
-def worker_office_view(worker: dict[str, Any]) -> dict[str, Any]:
-    """OFFICE 응답용: 내부 운영 데이터 포함, DynamoDB 키만 제거."""
-    return {k: v for k, v in worker.items() if k not in {"PK", "SK", "GSI1PK", "GSI1SK"}}
+# ---------------------------------------------------------------------------
+# Office / Company
+# ---------------------------------------------------------------------------
+def build_office(
+    *,
+    name: str,
+    region: str,
+    office_id: str | None = None,
+    location_text: str = "",
+    owner_name: str = "",
+    owner_user_id: str = "",
+    phone: str = "",
+) -> dict[str, Any]:
+    oid = office_id or new_id("OFFICE_")
+    return {
+        "office_id": oid,
+        "name": name,
+        "region": region,
+        "location_text": location_text,
+        "owner_name": owner_name,
+        "owner_user_id": owner_user_id,
+        "phone": phone,
+        "created_at": now_iso(),
+    }
+
+
+def office_public_view(office: dict[str, Any], worker_count: int = 0, active: bool = True) -> dict[str, Any]:
+    """GET /offices 응답용 (Office 계약: office_id, name, region, worker_count, active)."""
+    return {
+        "office_id": office.get("office_id"),
+        "name": office.get("name"),
+        "region": office.get("region"),
+        "worker_count": worker_count,
+        "active": active,
+    }
+
+
+def build_company(
+    *,
+    name: str,
+    region: str = "",
+    company_id: str | None = None,
+    owner_name: str = "",
+    owner_user_id: str = "",
+    phone: str = "",
+) -> dict[str, Any]:
+    cid = company_id or new_id("COMPANY_")
+    return {
+        "company_id": cid,
+        "name": name,
+        "region": region,
+        "owner_name": owner_name,
+        "owner_user_id": owner_user_id,
+        "phone": phone,
+        "created_at": now_iso(),
+    }
 
 
 # ---------------------------------------------------------------------------
-# WorkRequest 아이템 빌더
+# WorkRequest
 # ---------------------------------------------------------------------------
 def build_request(
     *,
@@ -187,25 +281,21 @@ def build_request(
     rid = request_id or new_id()
     ts = now_iso()
     item = {
-        "PK": request_pk(rid),
-        "SK": "META",
-        "GSI1PK": office_gsi1pk(office_id),
-        "GSI1SK": request_gsi1sk(status, rid),
-        "GSI2PK": company_gsi2pk(company_id),
-        "GSI2SK": f"REQ#{rid}",
-        "item_type": ItemType.WORK_REQUEST,
         "request_id": rid,
         "company_id": company_id,
         "office_id": office_id,
+        "gsi1sk": request_gsi1sk(status, rid),
         "site_name": site_name,
         "work_date": work_date,
         "start_time": start_time,
         "location_text": location_text,
-        "required_workers": required_workers,  # [{trade, count, min_skill_level?}]
+        "required_workers": required_workers,
         "budget": budget,
         "priority": priority or {},
         "notes": notes,
         "status": status,
+        "rejection_reason": None,
+        "declined_worker_ids": [],
         "created_at": ts,
         "updated_at": ts,
     }
@@ -213,51 +303,145 @@ def build_request(
 
 
 def request_view(req: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in req.items() if k not in {"PK", "SK", "GSI1PK", "GSI1SK", "GSI2PK", "GSI2SK"}}
+    return {k: clean(v) for k, v in req.items() if k not in {"gsi1sk"}}
 
 
 # ---------------------------------------------------------------------------
-# Crew 아이템 빌더
+# Crew
+#   proposed_members: [{worker_id, assigned_trade, offered_wage, is_replacement?}]
+#   승인 전 조원 상세는 여기서, 승인 후에는 Assignments 조인으로 구성한다.
 # ---------------------------------------------------------------------------
 def build_crew(
     *,
     office_id: str,
     request_id: str,
-    member_ids: list[str],
+    proposed_members: list[dict[str, Any]],
     status: str = CrewStatus.DRAFT,
     crew_id: str | None = None,
     source: str = "MANUAL",       # MANUAL / AGENT
-    rationale: str = "",
-    estimated_cost: int | None = None,
+    reason: str = "",
+    considerations: list[str] | None = None,
+    total_cost: int | None = None,
+    recommendations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     cid = crew_id or new_id()
     ts = now_iso()
+    member_ids = [m["worker_id"] for m in proposed_members]
     item = {
-        "PK": crew_pk(cid),
-        "SK": "META",
-        "GSI1PK": office_gsi1pk(office_id),
-        "GSI1SK": crew_gsi1sk(status, cid),
-        "item_type": ItemType.CREW,
         "crew_id": cid,
         "office_id": office_id,
         "request_id": request_id,
+        "gsi1sk": crew_gsi1sk(status, cid),
         "member_ids": member_ids,
+        "proposed_members": proposed_members,
         "status": status,
         "source": source,
-        "rationale": rationale,
-        "estimated_cost": estimated_cost,
+        "reason": reason,
+        "considerations": considerations or [],
+        "total_cost": total_cost,
+        "recommendations": recommendations or [],
         "created_at": ts,
         "updated_at": ts,
     }
     return to_decimal(item)
 
 
-def crew_view(crew: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in crew.items() if k not in {"PK", "SK", "GSI1PK", "GSI1SK"}}
+def crew_view(crew: dict[str, Any], members: list[dict[str, Any]]) -> dict[str, Any]:
+    """Crew 응답 (members는 caller가 Assignments/proposed_members 조인으로 전달)."""
+    return {
+        "crew_id": crew.get("crew_id"),
+        "request_id": crew.get("request_id"),
+        "office_id": crew.get("office_id"),
+        "status": crew.get("status"),
+        "source": crew.get("source"),
+        "member_ids": clean(crew.get("member_ids") or []),
+        "members": clean(members),
+        "recommendations": clean(crew.get("recommendations") or []),
+        "total_cost": clean(crew.get("total_cost")),
+        "reason": crew.get("reason", ""),
+        "considerations": clean(crew.get("considerations") or []),
+        "created_at": crew.get("created_at"),
+        "updated_at": crew.get("updated_at"),
+    }
 
 
 # ---------------------------------------------------------------------------
-# GapEvent 아이템 빌더
+# Assignment (CrewMember 원본)
+# ---------------------------------------------------------------------------
+def build_assignment(
+    *,
+    crew_id: str,
+    worker_id: str,
+    assigned_trade: str,
+    offered_wage: int,
+    acceptance: str = Acceptance.PENDING,
+    status: str = "RESERVED",
+    is_replacement: bool = False,
+    eta: str | None = None,
+    notified_at: str | None = None,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    ts = created_at or now_iso()
+    item = {
+        "crew_id": crew_id,
+        "worker_id": worker_id,
+        "assigned_trade": assigned_trade,
+        "offered_wage": offered_wage,
+        "acceptance": acceptance,
+        "status": status,
+        "is_replacement": is_replacement,
+        "eta": eta,
+        "notified_at": notified_at or ts,
+        "created_at": ts,
+        "updated_at": ts,
+    }
+    return to_decimal(item)
+
+
+def build_offer(crew_id: str, request: dict[str, Any], member: dict[str, Any], *, is_emergency: bool = False) -> dict[str, Any]:
+    """Worker.current_offer 페이로드 (계약 v2 union)."""
+    offer = {
+        "crew_id": crew_id,
+        "request_id": request.get("request_id"),
+        "assigned_trade": member.get("assigned_trade"),
+        "offered_wage": member.get("offered_wage"),
+        "site_name": request.get("site_name"),
+        "work_date": request.get("work_date"),
+        "start_time": request.get("start_time"),
+        "location_text": request.get("location_text"),
+        "notified_at": now_iso(),
+    }
+    if is_emergency:
+        offer["is_emergency"] = True
+    return offer
+
+
+def crew_member_view(assignment: dict[str, Any], worker: dict[str, Any] | None) -> dict[str, Any]:
+    """CrewMember 계약: worker_id, name, assigned_trade, skill_level, offered_wage,
+    acceptance, notified_at?, is_replacement?, eta?, worker_state?."""
+    view: dict[str, Any] = {
+        "worker_id": assignment.get("worker_id"),
+        "name": (worker or {}).get("name"),
+        "assigned_trade": assignment.get("assigned_trade"),
+        "skill_level": clean((worker or {}).get("skill_level")),
+        "offered_wage": clean(assignment.get("offered_wage")),
+        "acceptance": assignment.get("acceptance"),
+    }
+    if assignment.get("notified_at"):
+        view["notified_at"] = assignment["notified_at"]
+    if assignment.get("is_replacement"):
+        view["is_replacement"] = True
+    if assignment.get("eta"):
+        view["eta"] = assignment["eta"]
+    if worker is not None:
+        view["worker_state"] = worker.get("state")
+    return view
+
+
+# ---------------------------------------------------------------------------
+# GapEvent
+#   계약: event_id, crew_id, request_id, office_id, type, affected_worker_id,
+#         affected_worker_name?, status, recommendations?, created_at, updated_at
 # ---------------------------------------------------------------------------
 def build_gap_event(
     *,
@@ -265,26 +449,25 @@ def build_gap_event(
     crew_id: str,
     request_id: str,
     gap_type: str,
-    missing_worker_ids: list[str],
+    affected_worker_id: str,
+    affected_worker_name: str = "",
     status: str = GapStatus.DETECTED,
     event_id: str | None = None,
 ) -> dict[str, Any]:
     eid = event_id or new_id()
     ts = now_iso()
     item = {
-        "PK": gap_pk(eid),
-        "SK": "META",
-        "GSI1PK": office_gsi1pk(office_id),
-        "GSI1SK": gap_gsi1sk(status, eid),
-        "item_type": ItemType.GAP_EVENT,
         "event_id": eid,
         "office_id": office_id,
         "crew_id": crew_id,
         "request_id": request_id,
-        "gap_type": gap_type,
-        "missing_worker_ids": missing_worker_ids,
-        "fixed_member_ids": [],
+        "gsi1sk": gap_gsi1sk(status, eid),
+        "type": gap_type,
+        "affected_worker_id": affected_worker_id,
+        "affected_worker_name": affected_worker_name,
+        "leaver_worker_id": affected_worker_id,
         "status": status,
+        "recommendations": [],
         "created_at": ts,
         "updated_at": ts,
     }
@@ -292,38 +475,56 @@ def build_gap_event(
 
 
 def gap_view(gap: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in gap.items() if k not in {"PK", "SK", "GSI1PK", "GSI1SK"}}
+    return {k: clean(v) for k, v in gap.items() if k not in {"gsi1sk", "leaver_worker_id"}}
 
 
 # ---------------------------------------------------------------------------
-# Notification 아이템 빌더
+# Notification
+#   계약: id, user_id, type, title, message, read, created_at
 # ---------------------------------------------------------------------------
 def build_notification(
     *,
     user_id: str,
-    kind: str,               # ASSIGNED / EMERGENCY_ASSIGNED / NEW_REQUEST / CREW_CHANGED
+    type: str,
     title: str,
     message: str,
-    payload: dict[str, Any] | None = None,
     notification_id: str | None = None,
 ) -> dict[str, Any]:
-    nid = notification_id or new_id()
+    nid = notification_id or new_id("NOTI_")
     ts = now_iso()
-    item = {
-        "PK": user_pk(user_id),
-        "SK": f"NOTI#{ts}#{nid}",
-        "item_type": ItemType.NOTIFICATION,
-        "notification_id": nid,
+    return {
         "user_id": user_id,
-        "kind": kind,
+        "sk": notification_sk(ts, nid),
+        "id": nid,
+        "type": type,
         "title": title,
         "message": message,
-        "payload": payload or {},
         "read": False,
         "created_at": ts,
     }
-    return to_decimal(item)
 
 
 def notification_view(noti: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in noti.items() if k not in {"PK", "SK"}}
+    return {
+        "id": noti.get("id"),
+        "user_id": noti.get("user_id"),
+        "type": noti.get("type"),
+        "title": noti.get("title"),
+        "message": noti.get("message"),
+        "read": bool(noti.get("read", False)),
+        "created_at": noti.get("created_at"),
+    }
+
+
+def work_history_entry(assignment: dict[str, Any], request: dict[str, Any] | None) -> dict[str, Any]:
+    """완료 Assignment → WorkHistoryEntry 계약."""
+    req = request or {}
+    return {
+        "crew_id": assignment.get("crew_id"),
+        "request_id": req.get("request_id"),
+        "site_name": req.get("site_name"),
+        "work_date": req.get("work_date"),
+        "assigned_trade": assignment.get("assigned_trade"),
+        "offered_wage": clean(assignment.get("offered_wage")),
+        "completed_at": assignment.get("updated_at") or assignment.get("created_at"),
+    }

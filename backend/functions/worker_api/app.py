@@ -1,6 +1,4 @@
-"""worker_api Lambda (F-A2).
-
-근로자 지원서 CRUD 및 대기 상태 전환.
+"""worker_api Lambda (계약 v2).
 
 Route:
   POST /worker/application       지원서 생성 (state = INACTIVE)
@@ -8,11 +6,13 @@ Route:
   GET  /worker/me                내 프로필·상태 조회
   POST /worker/state/ready       대기 시작 (INACTIVE -> READY)
   POST /worker/state/inactive    대기 취소 (READY -> INACTIVE)
+  POST /worker/offer/accept      제안 수락 (트랜잭션 2, body: eta?)
+  POST /worker/offer/decline     제안 거절 (트랜잭션 3)
   GET  /worker/assignments       내 배정 조회
+  GET  /worker/history           작업 이력 (Assignments GSI1)
 
-설계: 자가 등록 근로자는 worker_id = user_id(cognito sub)로 생성하여
-      PK = WORKER#{user_id} 로 자기 리소스를 조회한다.
-법·윤리 제약: 근로자 본인 응답에도 no_show_count 등 부정 데이터는 노출하지 않는다.
+자가 등록 근로자는 worker_id = user_id(cognito sub)로 생성한다.
+성실도(completed/dispatched)는 본인 응답에 노출하지 않는다 (인력사무소 한정).
 """
 
 from __future__ import annotations
@@ -21,39 +21,38 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
+from shared import db, txn
 from shared.auth import Principal
-from shared.db import (
-    crew_pk,
-    get_item,
-    put_item,
-    request_pk,
-    update_item,
-    worker_gsi1sk,
-    worker_pk,
-)
 from shared.responses import ApiError, ErrorCode, success
 from shared.routing import Router
 from shared.schemas import (
     build_worker,
-    crew_view,
+    new_id,
     now_iso,
     parse_body,
-    request_view,
     require_fields,
     validate_skill_level,
-    validate_trade,
+    validate_trades,
+    work_history_entry,
+    worker_self_view,
 )
-from shared.state import Role, WorkerState
+from shared.state import (
+    Acceptance,
+    AssignmentStatus,
+    CrewStatus,
+    GapType,
+    RequestStatus,
+    Role,
+    WorkerState,
+)
 
 router = Router()
 
-PROFILE_SK = "PROFILE"
-
-# 지원서에서 수정 가능한 프로필 필드
 _EDITABLE_FIELDS = (
     "name",
     "phone",
-    "trade",
+    "preferred_trades",
+    "excluded_trades",
     "skill_level",
     "career_years",
     "age",
@@ -62,88 +61,51 @@ _EDITABLE_FIELDS = (
     "certifications",
 )
 
-# 근로자 본인에게 노출하지 않는 내부/부정 데이터 및 키 (공유 계약 §8)
-_WORKER_SELF_HIDDEN = frozenset(
-    {"no_show_count", "PK", "SK", "GSI1PK", "GSI1SK", "user_id"}
-)
-
-
-def _self_view(worker: dict[str, Any]) -> dict[str, Any]:
-    """근로자 본인 응답용 뷰 (부정 데이터 제외)."""
-    return {k: v for k, v in worker.items() if k not in _WORKER_SELF_HIDDEN}
-
 
 def _load_own_worker(principal: Principal) -> dict[str, Any]:
-    worker = get_item(worker_pk(principal.user_id), PROFILE_SK)
+    worker = db.get_worker_by_user(principal.user_id)
     if not worker:
-        raise ApiError(
-            ErrorCode.WORKER_NOT_FOUND,
-            "등록된 지원서가 없습니다. 먼저 지원서를 등록하세요.",
-        )
+        raise ApiError(ErrorCode.WORKER_NOT_FOUND, "등록된 지원서가 없습니다. 먼저 지원서를 등록하세요.")
     return worker
 
 
-def _transition_state(worker_id: str, from_state: str, to_state: str) -> None:
-    """state == from_state 조건부 쓰기로 to_state 전환. GSI1SK도 함께 갱신."""
-    now = now_iso()
-    try:
-        update_item(
-            worker_pk(worker_id),
-            PROFILE_SK,
-            UpdateExpression="SET #s = :to, GSI1SK = :gsi, state_changed_at = :t, updated_at = :t",
-            ConditionExpression="#s = :from",
-            ExpressionAttributeNames={"#s": "state"},
-            ExpressionAttributeValues={
-                ":to": to_state,
-                ":from": from_state,
-                ":gsi": worker_gsi1sk(to_state, worker_id),
-                ":t": now,
-            },
-        )
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            raise ApiError(
-                ErrorCode.STATE_CONFLICT,
-                "상태가 이미 변경되어 요청을 처리할 수 없습니다.",
-            )
-        raise
+def _completed_history(worker_id: str) -> list[dict[str, Any]]:
+    """Assignments GSI1에서 완료 이력을 유도한다."""
+    history = []
+    for a in db.query_worker_assignments(worker_id):
+        if a.get("status") == AssignmentStatus.COMPLETED:
+            crew = db.get_crew(a["crew_id"])
+            req = db.get_request(crew["request_id"]) if crew else None
+            history.append(work_history_entry(a, req))
+    return history
 
 
 # ---------------------------------------------------------------------------
 # 지원서 CRUD
 # ---------------------------------------------------------------------------
 @router.route("POST", "/worker/application")
-def create_application(event: dict[str, Any], principal: Principal, _params: dict[str, str]):
+def create_application(event, principal: Principal, _params):
     principal.require_role(Role.WORKER)
     body = parse_body(event)
     require_fields(
         body,
-        [
-            "name",
-            "phone",
-            "office_id",
-            "trade",
-            "skill_level",
-            "career_years",
-            "age",
-            "region",
-            "desired_daily_wage",
-        ],
+        ["name", "phone", "office_id", "preferred_trades", "skill_level",
+         "career_years", "age", "region", "desired_daily_wage"],
     )
+    preferred = validate_trades(body.get("preferred_trades"), "preferred_trades")
+    excluded = validate_trades(body.get("excluded_trades"), "excluded_trades")
 
-    if get_item(worker_pk(principal.user_id), PROFILE_SK):
-        raise ApiError(
-            ErrorCode.VALIDATION_ERROR,
-            "이미 지원서가 존재합니다. 수정(PUT /worker/application)을 이용하세요.",
-        )
+    if db.get_worker(principal.user_id):
+        raise ApiError(ErrorCode.VALIDATION_ERROR, "이미 지원서가 존재합니다. 수정(PUT)을 이용하세요.")
 
     item = build_worker(
         user_id=principal.user_id,
-        worker_id=principal.user_id,  # 자가 등록: worker_id = cognito sub
+        worker_id=principal.user_id,
         name=body["name"],
         phone=body["phone"],
         office_id=body["office_id"],
-        trade=body["trade"],
+        preferred_trades=preferred,
+        excluded_trades=excluded,
         skill_level=body["skill_level"],
         career_years=int(body["career_years"]),
         age=int(body["age"]),
@@ -152,18 +114,17 @@ def create_application(event: dict[str, Any], principal: Principal, _params: dic
         certifications=body.get("certifications") or [],
         state=WorkerState.INACTIVE,
     )
-    # 동시 중복 생성 방지
     try:
-        put_item(item, condition="attribute_not_exists(PK)")
+        db.put_worker(item, condition="attribute_not_exists(worker_id)")
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
             raise ApiError(ErrorCode.VALIDATION_ERROR, "이미 지원서가 존재합니다.")
         raise
-    return success(_self_view(item), status_code=201)
+    return success(worker_self_view(item), status_code=201)
 
 
 @router.route("PUT", "/worker/application")
-def update_application(event: dict[str, Any], principal: Principal, _params: dict[str, str]):
+def update_application(event, principal: Principal, _params):
     principal.require_role(Role.WORKER)
     worker = _load_own_worker(principal)
     body = parse_body(event)
@@ -175,8 +136,10 @@ def update_application(event: dict[str, Any], principal: Principal, _params: dic
     if not updates:
         raise ApiError(ErrorCode.VALIDATION_ERROR, "수정할 항목이 없습니다.")
 
-    if "trade" in updates:
-        validate_trade(updates["trade"])
+    if "preferred_trades" in updates:
+        updates["preferred_trades"] = validate_trades(updates["preferred_trades"], "preferred_trades")
+    if "excluded_trades" in updates:
+        updates["excluded_trades"] = validate_trades(updates["excluded_trades"], "excluded_trades")
     if "skill_level" in updates:
         updates["skill_level"] = validate_skill_level(updates["skill_level"])
     for int_field in ("career_years", "age", "desired_daily_wage"):
@@ -187,98 +150,294 @@ def update_application(event: dict[str, Any], principal: Principal, _params: dic
     set_parts = ["updated_at = :t"]
     expr_values: dict[str, Any] = {":t": now}
     expr_names: dict[str, str] = {}
+    from shared.schemas import to_decimal
     for i, (key, value) in enumerate(updates.items()):
         set_parts.append(f"#f{i} = :v{i}")
         expr_names[f"#f{i}"] = key
-        expr_values[f":v{i}"] = value
+        expr_values[f":v{i}"] = to_decimal(value)
 
-    resp = update_item(
-        worker_pk(worker["worker_id"]),
-        PROFILE_SK,
+    resp = db.update_worker(
+        worker["worker_id"],
         UpdateExpression="SET " + ", ".join(set_parts),
         ExpressionAttributeNames=expr_names,
         ExpressionAttributeValues=expr_values,
         ReturnValues="ALL_NEW",
     )
-    return success(_self_view(resp["Attributes"]))
+    return success(worker_self_view(resp["Attributes"]))
 
 
 @router.route("GET", "/worker/me")
-def get_me(_event: dict[str, Any], principal: Principal, _params: dict[str, str]):
+def get_me(_event, principal: Principal, _params):
     principal.require_role(Role.WORKER)
     worker = _load_own_worker(principal)
-    return success(_self_view(worker))
+    return success(worker_self_view(worker, work_history=_completed_history(worker["worker_id"])))
 
 
 # ---------------------------------------------------------------------------
 # 대기 상태 전환
 # ---------------------------------------------------------------------------
+def _simple_transition(worker: dict[str, Any], to_state: str) -> dict[str, Any]:
+    now = now_iso()
+    try:
+        resp = db.update_worker(
+            worker["worker_id"],
+            UpdateExpression="SET #s = :to, gsi1sk = :gsi, state_changed_at = :t, updated_at = :t",
+            ConditionExpression="#s = :from",
+            ExpressionAttributeNames={"#s": "state"},
+            ExpressionAttributeValues={
+                ":to": to_state,
+                ":from": worker["state"],
+                ":gsi": db.worker_gsi1sk(to_state, worker["worker_id"]),
+                ":t": now,
+            },
+            ReturnValues="ALL_NEW",
+        )
+        return resp["Attributes"]
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise ApiError(ErrorCode.STATE_CONFLICT, "상태가 이미 변경되어 요청을 처리할 수 없습니다.")
+        raise
+
+
 @router.route("POST", "/worker/state/ready")
-def start_ready(_event: dict[str, Any], principal: Principal, _params: dict[str, str]):
+def start_ready(_event, principal: Principal, _params):
     principal.require_role(Role.WORKER)
     worker = _load_own_worker(principal)
-    state = worker["state"]
-
-    if state == WorkerState.READY:
-        return success(_self_view(worker))  # 멱등 처리
-    if state != WorkerState.INACTIVE:
-        raise ApiError(
-            ErrorCode.STATE_CONFLICT,
-            "배정/작업 중에는 대기를 시작할 수 없습니다.",
-        )
-
-    _transition_state(worker["worker_id"], WorkerState.INACTIVE, WorkerState.READY)
-    worker["state"] = WorkerState.READY
-    return success(_self_view(worker))
+    if worker["state"] == WorkerState.READY:
+        return success(worker_self_view(worker))
+    if worker["state"] != WorkerState.INACTIVE:
+        raise ApiError(ErrorCode.WORKER_NOT_READY, "대기 시작은 INACTIVE 상태에서만 가능합니다.")
+    updated = _simple_transition(worker, WorkerState.READY)
+    return success(worker_self_view(updated))
 
 
 @router.route("POST", "/worker/state/inactive")
-def cancel_ready(_event: dict[str, Any], principal: Principal, _params: dict[str, str]):
+def cancel_ready(_event, principal: Principal, _params):
     principal.require_role(Role.WORKER)
     worker = _load_own_worker(principal)
-    state = worker["state"]
-
-    if state == WorkerState.INACTIVE:
-        return success(_self_view(worker))  # 멱등 처리
-    if state != WorkerState.READY:
-        raise ApiError(
-            ErrorCode.STATE_CONFLICT,
-            "배정/작업 중에는 대기를 취소할 수 없습니다.",
-        )
-
-    _transition_state(worker["worker_id"], WorkerState.READY, WorkerState.INACTIVE)
-    worker["state"] = WorkerState.INACTIVE
-    return success(_self_view(worker))
+    if worker["state"] == WorkerState.INACTIVE:
+        return success(worker_self_view(worker))
+    if worker["state"] in (WorkerState.NOTIFIED, WorkerState.RESERVED, WorkerState.RUNNING):
+        raise ApiError(ErrorCode.WORKER_ALREADY_RUNNING, "현재 상태에서는 대기를 취소할 수 없습니다.")
+    updated = _simple_transition(worker, WorkerState.INACTIVE)
+    return success(worker_self_view(updated))
 
 
 # ---------------------------------------------------------------------------
-# 내 배정 조회
+# 제안 수락 (트랜잭션 2)
+# ---------------------------------------------------------------------------
+@router.route("POST", "/worker/offer/accept")
+def accept_offer(event, principal: Principal, _params):
+    principal.require_role(Role.WORKER)
+    worker = _load_own_worker(principal)
+    offer = worker.get("current_offer")
+    if worker["state"] != WorkerState.NOTIFIED or not offer:
+        raise ApiError(ErrorCode.STATE_CONFLICT, "수락할 배정 제안이 없습니다.")
+
+    body = parse_body(event)
+    eta = body.get("eta")
+    crew_id = offer["crew_id"]
+    now = now_iso()
+
+    entries = [
+        txn.worker_entry(
+            worker["worker_id"],
+            now=now,
+            to_state=WorkerState.RESERVED,
+            from_states=[WorkerState.NOTIFIED],
+            inc_dispatched=True,
+        ),
+        txn.assignment_update_entry(
+            crew_id,
+            worker["worker_id"],
+            now=now,
+            acceptance=Acceptance.ACCEPTED,
+            status=AssignmentStatus.RESERVED,
+            eta=eta if eta else txn._SENTINEL,
+            require_acceptance=Acceptance.PENDING,
+        ),
+    ]
+    try:
+        txn.run(entries)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("TransactionCanceledException", "ConditionalCheckFailedException"):
+            raise ApiError(ErrorCode.STATE_CONFLICT, "제안 상태가 변경되어 수락할 수 없습니다.")
+        raise
+
+    _rollup_after_accept(crew_id)
+    updated = db.get_worker(worker["worker_id"])
+    return success(worker_self_view(updated))
+
+
+def _rollup_after_accept(crew_id: str) -> None:
+    """조원 전원 수락 시 Crew/Request → DISPATCHED, 진행 중 GapEvent → FILLED (파생 롤업)."""
+    assignments = db.query_crew_assignments(crew_id)
+    active = [a for a in assignments if a.get("acceptance") != Acceptance.DECLINED]
+    if not active or any(a.get("acceptance") != Acceptance.ACCEPTED for a in active):
+        return
+
+    crew = db.get_crew(crew_id)
+    if not crew:
+        return
+    # 기존 팀원 중 작업 중(RUNNING)이 있으면 RUNNING, 아니면 DISPATCHED
+    any_running = False
+    for a in active:
+        w = db.get_worker(a["worker_id"])
+        if w and w.get("state") == WorkerState.RUNNING:
+            any_running = True
+            break
+    crew_status = CrewStatus.RUNNING if any_running else CrewStatus.DISPATCHED
+    req_status = RequestStatus.RUNNING if any_running else RequestStatus.DISPATCHED
+    now = now_iso()
+
+    db.update_crew(
+        crew_id,
+        UpdateExpression="SET #s = :cs, gsi1sk = :g, updated_at = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":cs": crew_status,
+            ":g": db.crew_gsi1sk(crew_status, crew_id),
+            ":t": now,
+        },
+    )
+    db.update_request(
+        crew["request_id"],
+        UpdateExpression="SET #s = :rs, gsi1sk = :g, updated_at = :t",
+        ExpressionAttributeNames={"#s": "status"},
+        ExpressionAttributeValues={
+            ":rs": req_status,
+            ":g": db.request_gsi1sk(req_status, crew["request_id"]),
+            ":t": now,
+        },
+    )
+    # 진행 중 결원 이벤트가 있으면 충원 완료 처리
+    for gap in db.query_gap_events_by_crew(crew_id):
+        if gap.get("status") in ("APPROVED", "PROPOSED", "RECOMPOSING", "DETECTED"):
+            db.update_gap_event(
+                gap["event_id"],
+                UpdateExpression="SET #s = :s, gsi1sk = :g, updated_at = :t",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":s": "FILLED",
+                    ":g": db.gap_gsi1sk("FILLED", gap["event_id"]),
+                    ":t": now,
+                },
+            )
+
+
+# ---------------------------------------------------------------------------
+# 제안 거절 (트랜잭션 3)
+# ---------------------------------------------------------------------------
+@router.route("POST", "/worker/offer/decline")
+def decline_offer(_event, principal: Principal, _params):
+    principal.require_role(Role.WORKER)
+    worker = _load_own_worker(principal)
+    offer = worker.get("current_offer")
+    if worker["state"] != WorkerState.NOTIFIED or not offer:
+        raise ApiError(ErrorCode.STATE_CONFLICT, "거절할 배정 제안이 없습니다.")
+
+    crew_id = offer["crew_id"]
+    crew = db.get_crew(crew_id)
+    request_id = crew["request_id"] if crew else offer.get("request_id")
+    now = now_iso()
+
+    gap = build_gap_event_stub(worker, crew, request_id)
+
+    entries = [
+        txn.worker_entry(
+            worker["worker_id"],
+            now=now,
+            to_state=WorkerState.READY,
+            from_states=[WorkerState.NOTIFIED],
+            current_offer=None,
+            current_crew_id=None,
+        ),
+        txn.assignment_update_entry(
+            crew_id,
+            worker["worker_id"],
+            now=now,
+            acceptance=Acceptance.DECLINED,
+            status=AssignmentStatus.DECLINED,
+        ),
+    ]
+    if gap is not None:
+        entries.append(txn.put_entry("gap_events", gap))
+    if request_id:
+        entries.append(
+            txn.request_status_entry(
+                request_id,
+                to_status=RequestStatus.COMPOSING,
+                now=now,
+                extra_set={"declined_worker_ids": _append_declined(request_id, worker["worker_id"])},
+            )
+        )
+    try:
+        txn.run(entries)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("TransactionCanceledException", "ConditionalCheckFailedException"):
+            raise ApiError(ErrorCode.STATE_CONFLICT, "제안 상태가 변경되어 거절할 수 없습니다.")
+        raise
+
+    updated = db.get_worker(worker["worker_id"])
+    return success(worker_self_view(updated))
+
+
+def _append_declined(request_id: str, worker_id: str) -> list[str]:
+    req = db.get_request(request_id)
+    declined = list((req or {}).get("declined_worker_ids") or [])
+    if worker_id not in declined:
+        declined.append(worker_id)
+    return declined
+
+
+def build_gap_event_stub(worker, crew, request_id):
+    from shared.schemas import build_gap_event
+    if not crew or not request_id:
+        return None
+    return build_gap_event(
+        office_id=crew["office_id"],
+        crew_id=crew["crew_id"],
+        request_id=request_id,
+        gap_type=GapType.DECLINED,
+        affected_worker_id=worker["worker_id"],
+        affected_worker_name=worker.get("name", ""),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 내 배정 / 이력
 # ---------------------------------------------------------------------------
 @router.route("GET", "/worker/assignments")
-def get_assignments(_event: dict[str, Any], principal: Principal, _params: dict[str, str]):
+def get_assignments(_event, principal: Principal, _params):
     principal.require_role(Role.WORKER)
     worker = _load_own_worker(principal)
-
     crew_id = worker.get("current_crew_id")
     if not crew_id:
-        return success({"assignments": []})
-
-    crew = get_item(crew_pk(crew_id), "META")
+        return success([])
+    crew = db.get_crew(crew_id)
     if not crew:
-        return success({"assignments": []})
-
-    assignment = {"crew": crew_view(crew)}
-    request = get_item(request_pk(crew["request_id"]), "META")
-    if request:
-        # 근로자에게는 현장 배정 정보(장소·날짜·시간)만 노출
-        req = request_view(request)
-        assignment["work"] = {
-            "site_name": req.get("site_name"),
-            "work_date": req.get("work_date"),
-            "start_time": req.get("start_time"),
-            "location_text": req.get("location_text"),
+        return success([])
+    request = db.get_request(crew["request_id"])
+    if not request:
+        return success([])
+    return success([
+        {
+            "crew_id": crew["crew_id"],
+            "request_id": request["request_id"],
+            "site_name": request.get("site_name"),
+            "work_date": request.get("work_date"),
+            "start_time": request.get("start_time"),
+            "location_text": request.get("location_text"),
+            "status": crew.get("status"),
         }
-    return success({"assignments": [assignment]})
+    ])
+
+
+@router.route("GET", "/worker/history")
+def get_history(_event, principal: Principal, _params):
+    principal.require_role(Role.WORKER)
+    worker = _load_own_worker(principal)
+    return success(_completed_history(worker["worker_id"]))
 
 
 def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
