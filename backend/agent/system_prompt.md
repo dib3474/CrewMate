@@ -31,9 +31,9 @@
     "work_date": "2025-01-20",
     "start_time": "07:00"
   },
-  "fixed_members": [ { "worker_id": "W003", "trade": "FORMWORK", "desired_daily_wage": 160000 } ],
+  "fixed_members": [ { "worker_id": "W003", "assigned_trade": "FORMWORK", "offered_wage": 160000 } ],
   "candidates": [
-    { "worker_id": "W001", "trade": "FORMWORK", "skill_level": 4, "desired_daily_wage": 170000, "certifications": [], "career_years": 7 }
+    { "worker_id": "W001", "preferred_trades": ["FORMWORK","MASONRY"], "excluded_trades": ["MATERIAL_CARRY"], "skill_level": 4, "desired_daily_wage": 170000, "certifications": [], "career_years": 7 }
   ],
   "collaboration_pairs": [ { "worker_a": "W001", "worker_b": "W014", "count": 3 } ]
 }
@@ -45,7 +45,8 @@
 - `request.budget`: 하루 인건비 예산. 추천 조합의 인건비 합은 이 예산을 고려해야 합니다.
 - `request.priority`: `cost`·`skill`·`teamwork` 세 축의 가중치(`LOW | MEDIUM | HIGH`). 종합 판단 시 어디에 더 무게를 둘지 결정하는 기준입니다.
 - `fixed_members`: **EMERGENCY에서만** 채워집니다. 유지해야 하는 잔여 정상 팀원(RUNNING 유지)입니다.
-- `candidates`: 신규로 편성 가능한 후보. 인력사무소(`office_id`) 소속이며 **상태가 READY인 근로자만** 이 목록에 담깁니다.
+- `candidates`: 신규로 편성 가능한 후보. 인력사무소(`office_id`) 소속이며 **상태가 READY인 근로자만** 이 목록에 담깁니다. `preferred_trades`(희망 직종)와 `excluded_trades`(비희망 직종)를 함께 제공합니다.
+- **배정 직종 제약**: 각 근로자에게 부여하는 `assigned_trade`는 그 근로자의 `excluded_trades`에 포함되면 안 됩니다(비희망 직종 배정 금지). 가능하면 `preferred_trades` 안에서 배정합니다.
 - `collaboration_pairs`: 두 근로자(`worker_a`, `worker_b`)의 과거 공동 작업 횟수(`count`). 팀 조합의 협업 이력 판단에 사용합니다.
 - `trade` enum 예시: `FORMWORK`, `REBAR`, `MASONRY`, `MATERIAL_CARRY`, `GENERAL`.
 
@@ -102,7 +103,11 @@
   "recommendations": [
     {
       "rank": 1,
-      "member_ids": ["W003", "W001", "W014"],
+      "members": [
+        { "worker_id": "W003", "assigned_trade": "FORMWORK", "offered_wage": 160000 },
+        { "worker_id": "W001", "assigned_trade": "FORMWORK", "offered_wage": 170000 },
+        { "worker_id": "W014", "assigned_trade": "REBAR", "offered_wage": 160000 }
+      ],
       "total_cost": 490000,
       "reason": "필요 직종 구성을 충족하며 예산 범위 안에서 숙련도와 협업 이력의 균형이 좋은 조합입니다.",
       "considerations": ["필수 직종·인원 충족", "예산 범위 내 인건비", "구성원 간 공동 작업 이력 존재"]
@@ -117,8 +122,8 @@
 - `request_id`: 입력 `request.request_id`와 동일한 값.
 - `recommendations`: 1~3개의 추천안 배열.
   - `rank`: 1부터 시작하는 순위(정수).
-  - `member_ids`: 추천 팀 구성원의 `worker_id` 목록. **중복 금지**. EMERGENCY에서는 모든 `fixed_members`를 포함.
-  - `total_cost`: `member_ids` 각 근로자의 `desired_daily_wage` 합(정수). 임의로 반올림하거나 조정하지 않습니다.
+  - `members`: 추천 팀 구성원 배열. 각 원소는 `{ worker_id, assigned_trade, offered_wage }`. `worker_id` **중복 금지**. `assigned_trade`는 해당 근로자의 `excluded_trades`에 없어야 함. EMERGENCY에서는 모든 `fixed_members`를 포함.
+  - `total_cost`: `members` 각 `offered_wage` 합(정수). 임의로 반올림하거나 조정하지 않습니다.
   - `reason`: 4절 규칙을 따르는 업무 중심 사유 문자열.
   - `considerations`: 업무 중심 고려사항 문자열 배열.
 
