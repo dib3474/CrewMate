@@ -20,22 +20,25 @@ Handler = Callable[[dict[str, Any], Principal, dict[str, str]], dict[str, Any]]
 
 class Router:
     def __init__(self) -> None:
-        self._routes: list[tuple[str, list[str], Handler]] = []
+        self._routes: list[tuple[str, list[str], Handler, bool]] = []
 
-    def add(self, method: str, path_template: str, handler: Handler) -> None:
-        """path_template 예: '/company/requests/{requestId}'."""
+    def add(self, method: str, path_template: str, handler: Handler, public: bool = False) -> None:
+        """path_template 예: '/company/requests/{requestId}'.
+
+        public=True 이면 인증(get_principal)을 건너뛴다 (signup/login/offices).
+        """
         segments = [s for s in path_template.strip("/").split("/")]
-        self._routes.append((method.upper(), segments, handler))
+        self._routes.append((method.upper(), segments, handler, public))
 
-    def route(self, method: str, path_template: str):
+    def route(self, method: str, path_template: str, public: bool = False):
         def deco(fn: Handler) -> Handler:
-            self.add(method, path_template, fn)
+            self.add(method, path_template, fn, public)
             return fn
         return deco
 
-    def _match(self, method: str, path: str) -> tuple[Handler, dict[str, str]] | None:
+    def _match(self, method: str, path: str) -> tuple[Handler, dict[str, str], bool] | None:
         req_segments = [s for s in path.strip("/").split("/")]
-        for m, segments, handler in self._routes:
+        for m, segments, handler, public in self._routes:
             if m != method or len(segments) != len(req_segments):
                 continue
             params: dict[str, str] = {}
@@ -47,7 +50,7 @@ class Router:
                     ok = False
                     break
             if ok:
-                return handler, params
+                return handler, params, public
         return None
 
     def dispatch(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -64,13 +67,13 @@ class Router:
         if match is None:
             return error(ErrorCode.VALIDATION_ERROR, f"경로를 찾을 수 없습니다: {method} {path}", 404)
 
-        handler, path_params = match
+        handler, path_params, public = match
         # API Gateway가 파싱한 pathParameters 를 우선 병합
         if event.get("pathParameters"):
             path_params = {**path_params, **{k: v for k, v in event["pathParameters"].items() if v is not None}}
 
         try:
-            principal = get_principal(event)
+            principal = None if public else get_principal(event)
             return handler(event, principal, path_params)
         except ApiError as exc:
             logger.info("api_error code=%s", exc.code)
