@@ -1,211 +1,178 @@
 # CrewMate
 
 건설 일용직 인력 중개를 디지털화하는 서버리스 AI 플랫폼.
-인력사무소의 전화·종이 기반 작업조 편성을 **상태 기반 배치 시스템 + Crew Composition Agent**로 대체한다.
+인력사무소의 전화·종이 기반 작업조 편성을 **상태 기반 배치 + Crew Composition Agent + 근로자 수락 플로우**로 대체한다.
+
+프론트엔드(mock) 배포: https://d1872k8ivu18th.cloudfront.net
 
 ---
 
-## 1. 문제와 솔루션
+## 1. 핵심 컨셉
 
-한국 건설 일용직 시장에서 인력사무소는 매일 새벽 전화로 근로자를 모으고, 수기로 조를 짜고, 노쇼가 발생하면 급하게 대체 인력을 수소문한다. CrewMate는 이 과정을 다음 세 가지로 대체한다.
-
-1. **상태 기반 인력 풀** — 근로자가 대기 버튼을 누르면 `READY` 상태가 되어 편성 후보로 조회된다.
-2. **Crew Composition Agent** — 건설사 요청 조건(직종·인원·예산·우선순위)과 READY 후보를 종합 평가해 **팀 단위 조합**을 추천한다. 인력사무소가 승인해야만 실제 배정된다 (Human-in-the-Loop).
-3. **긴급 재편성** — 노쇼/이탈 발생 시 **동일한 Agent**를 EMERGENCY 모드로 재호출한다. 남은 팀원은 고정하고, READY 후보 중 팀 전체 조합이 가장 좋아지는 인원을 추천한다.
-
-핵심 차별점: 개인 점수 랭킹이 아니라 **기존 팀 + 후보의 조합**을 평가하는 팀 단위 편성.
+1. **상태 기반 인력 풀** — 근로자가 대기 버튼을 누르면 `READY`가 되어 편성 후보로 조회된다.
+2. **Crew Composition Agent** — 요청 조건(직종·인원·예산·우선순위)과 READY 후보를 종합해 **팀 단위 조합**을 추천한다. AI는 추천만 하고 배정하지 않는다.
+3. **이중 Human-in-the-Loop** — 인력사무소가 승인하고, 근로자가 직접 수락해야 배차가 확정된다.
+4. **추가 편성(긴급 배차)** — 거절·취소·노쇼·이탈로 결원이 생기면, 수락을 유지한 인원은 고정하고 결원만 동일 Agent(EMERGENCY) 또는 수동으로 충원한다.
 
 ---
 
 ## 2. 사용자 역할
 
-| 역할 | 설명 | 주요 기능 |
-|---|---|---|
-| `WORKER` | 인력사무소에 등록한 근로자 | 지원서 등록, 대기 시작/취소, 배정 확인 |
-| `OFFICE` | 근로자 풀을 관리하고 작업조를 편성 | 후보 조회, 수동/Agent 편성, 승인, 긴급 재편성 |
-| `COMPANY` | 현장 인력을 요청하는 건설사 | 인력 요청 생성, 확정 작업조 확인, 결원 등록 |
+| 역할 | 주요 기능 |
+|---|---|
+| `WORKER` | 회원가입, 지원서 등록, 대기 시작/취소, 배정 제안 수락/거절, 작업 이력 |
+| `OFFICE` | 회원가입(사무소 자동 생성), 후보 조회, 수동/AI 편성, 임금 조절, 승인, 요청 거절, 추가 편성 |
+| `COMPANY` | 회원가입, 인력 요청, 확정 작업조 확인, 출근/퇴근 처리, 결원 등록 |
 
 ---
 
-## 3. 핵심 흐름
+## 3. 근로자 상태 머신 (v2)
 
 ```text
-근로자 지원서 등록
-    → state = INACTIVE
-근로자 대기 버튼
-    → state = READY
-건설사 인력 요청 생성
-    → 인력사무소 요청 확인
-수동 편성  또는  Crew Composition Agent 자동 편성 (NORMAL 모드)
-    → 인력사무소 승인 클릭
-    → READY 상태 재검증 (조건부 쓰기)
-    → state = RESERVED
-    → 배차 완료
-    → state = RUNNING
-
-[노쇼 / 중도 이탈]
-    → Gap Event 생성
-    → 기존 정상 팀원 RUNNING 유지 (fixed_members)
-    → READY 후보 조회
-    → 동일 Agent 재호출 (EMERGENCY 모드)
-    → 긴급 작업조 추천
-    → 인력사무소 승인 (READY 재검증 → RESERVED)
-    → 대체 인력 RUNNING, 작업조 갱신
+            대기 시작        사무소 승인(제안 발송)     근로자 수락        건설사 출근 처리      건설사 퇴근 처리
+INACTIVE ──────────▶ READY ──────────────▶ NOTIFIED ──────────▶ RESERVED ──────────▶ RUNNING ──────────▶ INACTIVE
+                       ▲                      │                     │                                  (이력 적립)
+                       │   거절 / 무응답 취소   │                     │
+                       └──────────────────────┘◀── 수락 후 취소 ──────┘
 ```
 
-### 근로자 상태 머신
+- 모든 전환은 `ConditionExpression` 조건부 쓰기. 승인 시 조원 전원을 `TransactWriteItems`로 원자 처리(READY→NOTIFIED).
+- 근로자는 동시에 하나의 제안(`current_offer`)만 가질 수 있다 — 중복 배치 방지의 새 관문.
+- 거절·취소·노쇼·이탈은 GapEvent를 발생시켜 추가 편성 흐름으로 이어진다.
+
+### 기타 상태 enum
 
 ```text
-               대기 시작              승인(조건부 쓰기)        배차 완료
-INACTIVE ──────────────▶ READY ──────────────────▶ RESERVED ─────────▶ RUNNING
-   ▲                       ▲                          │                   │
-   │                       └──── 배차 취소/실패 ───────┘                   │
-   └─────────────────────────────── 작업 종료 ────────────────────────────┘
+WorkRequest: REQUESTED → COMPOSING → PROPOSED → APPROVED → DISPATCHED → RUNNING → COMPLETED (+CANCELLED, REJECTED)
+             COMPOSING은 결원 재편성 중에도 재사용
+Crew:        DRAFT → PROPOSED → APPROVED → NOTIFIED → DISPATCHED → RUNNING → COMPLETED (+CANCELLED)
+GapEvent:    DETECTED → RECOMPOSING → PROPOSED → APPROVED → FILLED (+FAILED)
+GapEvent 유형: NO_SHOW(노쇼) / LEFT_SITE(중도 이탈) / UNAVAILABLE(수락 후 취소) / DECLINED(제안 거절)
+CrewMember acceptance: PENDING / ACCEPTED / DECLINED
 ```
-
-중복 배치 방지 규칙:
-
-- 신규 편성 후보는 `READY` 상태만 사용한다.
-- 승인 순간 `state == READY` 조건부 쓰기로 `RESERVED` 전환. 조원 전체를 `TransactWriteItems`로 원자 처리한다.
-- 한 명이라도 조건 실패 시 전체 승인을 중단하고 `STATE_CONFLICT`를 반환한다.
 
 ---
 
-## 4. 시스템 아키텍처 (100% 서버리스)
+## 4. 성실도 (신뢰 지표)
+
+부정적 낙인 없이 이행률만 중립적으로 보여준다.
+
+- 저장: `completed_count`(근무 완료 수), `dispatched_count`(배차 확정 수) — 원시값 2개만.
+- 표기: **성실도 10/11** (완료/배차). 수락으로 배차 확정 시 분모 +1, 정상 퇴근 시 분자 +1. 노쇼·이탈·수락 후 취소는 분자가 오르지 않는다. 제안 단계 거절은 배차 확정 전이므로 집계 제외.
+- 노출 범위: **인력사무소 내부 화면 한정.** 건설사 응답·화면, Agent 추천 사유 텍스트에는 절대 포함하지 않는다.
+- "노쇼", "탈주", "블랙리스트" 등 부정 라벨을 UI·API 응답 문구에 사용하지 않는다 (근로기준법 제40조 취업 방해 금지 관련 리스크 회피 설계).
+
+---
+
+## 5. 직종·임금 모델
+
+- 직종: 단일 `trade` 대신 `preferred_trades[]`(희망) + `excluded_trades[]`(비희망). 배정 직종은 `assigned_trade`로 별도 기록하며 비희망 직종 배정은 검증에서 거부.
+- 임금: 사무소가 편성 시 인원별 `offered_wage` 조절 가능(기본값 `desired_daily_wage`). `sum(offered_wage) ≤ request.budget` 을 편성·승인 시 검증. Agent 추천도 동일 예산 제약.
+
+---
+
+## 6. 핵심 흐름
+
+### 일반 편성
+
+```text
+건설사 요청 → 사무소 확인 → 수동 편성 또는 Agent(NORMAL) 추천 → 임금 조절 → 승인
+→ 조원 전원 READY→NOTIFIED (원자 전환) + 제안 발송
+→ 근로자 개별 수락(NOTIFIED→RESERVED) → 전원 수락 시 DISPATCHED
+→ 작업일 건설사 출근 처리(RESERVED→RUNNING) → 퇴근 처리(RUNNING→INACTIVE, 이력 적립)
+```
+
+### 추가 편성 (긴급 배차)
+
+```text
+결원 발생 (거절 / 수락 후 취소 / 노쇼 / 이탈)
+→ GapEvent 생성, 요청 상태 COMPOSING(재편성 중)
+→ 수락 유지 인원 = fixed_members 고정 (상태 불변)
+→ 잔여 예산 = budget − 고정 인원 offered_wage 합
+→ 동일 Agent EMERGENCY 추천 또는 수동 fill-gap
+→ 사무소 승인 → 대체자 제안 → 대체자 수락 시 GapEvent FILLED, 작업조 갱신
+→ 이 요청에 거절 이력 있는 근로자(declined_worker_ids)는 후보에서 제외
+```
+
+---
+
+## 7. 시스템 아키텍처 (100% 서버리스)
 
 ```text
 React SPA (S3 + CloudFront)
         │
-     Cognito (시드 데모 계정 3종)
+   /auth/signup·login (Cognito 래핑, 백엔드 제공)
         │
-   API Gateway REST
+   API Gateway REST  ← 폴링 3~5초
         │
-   ├─ Core Lambda (worker / company / office / assignment / notification)
-   └─ Agent Invoke Lambda
-           │
-     Crew Composition Agent (Strands Agents SDK + Amazon Bedrock)
-           │  Tools: get_request_detail / get_ready_workers /
-           │         get_worker_history / get_current_crew
-           ▼
-     DynamoDB 단일 테이블 (CrewMate)
-           │
-      EventBridge ─▶ Gap Event Lambda / Notification Lambda
+   ├─ Core Lambda (auth / worker / company / office / assignment / notification)
+   └─ Agent Invoke Lambda ─ Crew Composition Agent (Strands + Bedrock, 읽기 전용 Tool)
+        │
+   EventBridge ─▶ Gap Event Lambda
+        │
+   DynamoDB 엔터티별 테이블 8종 (크로스 테이블 TransactWriteItems)
 ```
 
-사용하지 않는 것: EC2, ECS, SageMaker, 별도 ML 모델, GPS 지오펜스, Amazon Location Service, WebSocket(P0는 폴링).
-
-AI 구성 요소는 **Crew Composition Agent 1개**뿐이며, 모든 상태 변경은 인증된 사용자 요청을 받은 Lambda가 수행한다. Agent는 조회·추천만 한다.
+사용하지 않는 것: EC2/ECS, SageMaker·별도 ML, GPS/지오펜스, Amazon Location Service, WebSocket(P0는 폴링).
 
 ---
 
-## 5. 데이터 모델 — DynamoDB 단일 테이블
+## 8. 데이터 모델 — 엔터티별 테이블
 
-테이블 1개(`CrewMate`)에 모든 엔터티를 `item_type`으로 구분해 저장한다.
-건설사별 물리 테이블을 만들지 않는다.
+같은 유형(열)의 데이터끼리 테이블을 분리한다. 승인·수락·출근 등 다중 테이블 상태 전환은 **하나의 `TransactWriteItems`**로 원자 처리한다.
 
-| 엔터티 | PK | SK | GSI1PK / GSI1SK |
+| 테이블 | 내용 | PK / SK | GSI |
 |---|---|---|---|
-| Worker | `WORKER#{worker_id}` | `PROFILE` | `OFFICE#{office_id}` / `STATE#{state}#W#{worker_id}` |
-| Work Request | `REQ#{request_id}` | `META` | `OFFICE#{office_id}` / `REQ#{status}#{request_id}` |
-| Crew(추천 포함) | `CREW#{crew_id}` | `META` | `OFFICE#{office_id}` / `CREW#{status}#{crew_id}` |
-| Gap Event | `GAP#{event_id}` | `META` | `OFFICE#{office_id}` / `GAP#{status}#{event_id}` |
-| Notification | `USER#{user_id}` | `NOTI#{created_at}#{id}` | — |
-| Collaboration | `WORKER#{worker_id}` | `COLLAB#{other_id}#{date}` | — |
+| Workers | 지원서·상태·성실도·직종 배열 | `worker_id` | GSI1: `office_id` + `state#worker_id` |
+| Offices | 사무소 마스터 (가입 시 자동 생성) | `office_id` | — |
+| Companies | 건설사 마스터 | `company_id` | — |
+| Requests | 건설사→사무소 요청 로그 (+거절 사유, 거절 근로자 목록) | `request_id` | GSI1: `office_id`+`status#id` / GSI2: `company_id`+`id` |
+| Crews | 작업조·Agent 추천안 | `crew_id` | GSI1: `office_id` + `status#id` |
+| Assignments | 배치 로그 = CrewMember 원본 (수락 상태·임금·배정 직종·eta) | `crew_id` / `worker_id` | GSI1: `worker_id` + `created_at` (내 배정·작업 이력) |
+| GapEvents | 결원 이벤트 로그 (4유형) | `event_id` | GSI1: `office_id` + `status#id` |
+| Notifications | 인앱 알림 (+읽음 처리) | `user_id` / `created_at#id` | — |
 
-- **GSI1** 하나로 "이 사무소의 READY 후보 / 요청 목록 / 작업조 목록"을 모두 조회한다.
-- **GSI2** (`COMPANY#{company_id}` / `REQ#{request_id}`)로 건설사 자기 요청 목록을 조회한다.
-- 상태 전환은 항상 `ConditionExpression`(예: `state = READY`) 기반 조건부 쓰기로 수행한다.
-
-### Worker 핵심 속성
-
-```json
-{
-  "worker_id": "UUID",
-  "name": "홍길동",
-  "phone": "010-....",
-  "office_id": "OFFICE001",
-  "state": "READY",
-  "trade": "FORMWORK",
-  "skill_level": 4,
-  "career_years": 7,
-  "age": 42,
-  "region": "BUSAN_HAEUNDAE",
-  "desired_daily_wage": 170000,
-  "certifications": ["비계기능사"],
-  "completed_count": 48,
-  "no_show_count": 1,
-  "current_crew_id": null,
-  "state_changed_at": "...",
-  "created_at": "...", "updated_at": "..."
-}
-```
-
-설계 원칙:
-
-- `worker_id`는 UUID. **주민등록번호는 해시 포함 어떤 형태로도 저장하지 않는다** (주민등록번호 수집 법정주의).
-- 신뢰도는 비율이 아니라 `completed_count` / `no_show_count` 원시값으로 저장하고 필요 시 계산한다.
-- 노쇼 이력 등 부정적 데이터는 인력사무소 내부 운영용으로만 사용하며, 건설사 화면·Agent 추천 사유 텍스트에 노출하지 않는다.
-- 다중 인력사무소 소속은 P1. P0는 `office_id` 단일 값.
+- CrewMember의 단일 진실 원천은 Assignments. Crew에는 `member_ids` 요약만 둔다.
+- 작업 이력과 협업 이력은 Assignments에서 유도한다 (별도 테이블 없음).
+- `worker_id`는 UUID. 주민등록번호는 어떤 형태로도 저장하지 않는다.
 
 ---
 
-## 6. 기술 스택
-
-| 영역 | 기술 |
-|---|---|
-| Frontend | React SPA, S3 + CloudFront |
-| Auth | Amazon Cognito (시드 계정) |
-| API | Amazon API Gateway REST |
-| Compute | AWS Lambda (Python) |
-| Agent | Strands Agents SDK + Amazon Bedrock |
-| DB | Amazon DynamoDB (단일 테이블) |
-| Event | Amazon EventBridge |
-| IaC | AWS SAM |
-| 알림 | DynamoDB 인앱 알림 + 프론트 폴링 (P0) |
-
----
-
-## 7. 레포 구조
+## 9. API 표면 (요약)
 
 ```text
-CrewMate/
-├── frontend/            # C 담당 — React SPA (worker/office/company 화면)
-├── backend/
-│   ├── functions/       # A 담당 — worker_api / company_request / office_core /
-│   │                    #          assignment / notification
-│   │   ├── agent_invoke/    # B 담당
-│   │   └── gap_event/       # B 담당
-│   └── shared/          # A 담당 — db / auth / schemas / state
-├── agent/               # B 담당 — crew_agent.py / system_prompt.md / tools/
-├── scripts/seed/        # A 담당 — 시드 및 데모 시나리오 데이터
-├── tests/
-├── template.yaml        # A 담당 — SAM
-└── README.md
+Auth:    POST /auth/signup, POST /auth/login
+Worker:  /worker/application, /worker/me, /worker/state/ready|inactive,
+         /worker/offer/accept, /worker/offer/decline, /worker/assignments, /worker/history
+Company: /company/requests(CRUD), /company/crews/{id}/gap-events,
+         /company/crews/{id}/checkin/{workerId}, /company/crews/{id}/checkout/{workerId}
+Office:  /office/workers, /office/requests, /office/requests/{id}/reject,
+         /office/crews/manual, /office/crews/{id}/approve, /office/crews/{id}/fill-gap,
+         /office/crews/{id}/cancel-composition, /office/cancel-offer,
+         /office/requests/{id}/agent-compose, /office/gap-events, /office/gap-events/{id}/agent-recompose,
+         /office/emergency/{id}/approve
+공통:    GET /offices, GET /notifications, POST /notifications/read
+응답:    { success, data } / { success, error: { code, message } }
 ```
 
 ---
 
-## 8. 팀 구성 (3인)
+## 10. 팀 문서
 
-| 담당 | 영역 | 산출물 |
-|---|---|---|
-| **A — 플랫폼/백엔드** | SAM, DynamoDB, Cognito, 코어 API 5종, 상태머신·조건부 쓰기, 시드 스크립트 | `PRD_A_BACKEND.md` |
-| **B — Agent/이벤트** | Crew Composition Agent, Agent Invoke Lambda, 응답 검증·폴백, Gap Event Lambda | `PRD_B_AGENT.md` |
-| **C — 프론트엔드/데모** | 3역할 React 화면, 폴링, 노쇼 시뮬레이션, 배포, 데모 리허설 | `PRD_C_FRONTEND.md` |
-
-상세 일정과 통합 지점은 `TEAM_PLAN.md` 참고.
+| 문서 | 내용 |
+|---|---|
+| `PROMPT_1_BACKEND_REBUILD.md` | 백엔드·Agent를 계약 v2 + 엔터티별 DB로 개편하는 AI 에이전트 프롬프트 |
+| `PROMPT_2_INTEGRATION_E2E.md` | 모노레포 통합, real 전환, E2E 디버깅 프롬프트 |
+| `FRONTEND_CHANGES.md` | 프론트엔드 구현 기준 계약 v2 원본 (담당자 C) |
 
 ---
 
-## 9. 최종 데모 시나리오
+## 11. 데모 시나리오 (v2)
 
-1. **등록과 대기** — WORKER 로그인 → 지원서 등록 → 대기 버튼 → `READY` 확인
-2. **요청과 AI 편성** — COMPANY 인력 요청 → OFFICE가 AI 자동 편성 실행 → 추천 3안 카드 확인 → 1안 승인 → 조원 `RUNNING`
-3. **노쇼와 긴급 재편성** — 작업조 A+B+C에서 C 노쇼 시뮬레이션 → Gap Event → 동일 Agent EMERGENCY 호출 → A+B+E 추천 → 승인 → E `RUNNING`, 작업조 A+B+E 갱신 → COMPANY 화면에서 변경 확인
+1. **가입과 대기** — WORKER 가입(사무소 선택) → 지원서 → 대기 → READY
+2. **요청과 AI 편성** — COMPANY 요청 → OFFICE AI 편성 → 추천 카드 → 임금 조절 → 승인 → 근로자 앱에서 수락 → DISPATCHED → 출근 처리 → RUNNING
+3. **결원과 추가 편성** — 노쇼 시뮬레이션(또는 수락 후 취소) → GapEvent → 잔여 인원 고정 + EMERGENCY 추천 → 승인 → 대체자 수락 → FILLED → COMPANY 화면 갱신
 
----
+## 12. Out of Scope
 
-## 10. Out of Scope (현재 버전)
-
-GPS 지오펜스 출결, 출근 잔디 그래프, 출근/노쇼 확률 예측 ML, SageMaker, 개인별 위험 점수, 자동 급여 정산, 전자 근로계약, SMS/푸시 필수 연동, 사무소 간 경쟁 입찰, Agent 자동 승인.
-
+GPS 출결, 출근 확률 예측 ML, SageMaker, 자동 급여 정산, 전자 근로계약, SMS/푸시, WebSocket(P1), 다중 사무소 소속(P1), 무응답 자동 타임아웃 Lambda(P1 — P0는 사무소의 수동 제안 취소 버튼).
