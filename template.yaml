@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  CrewMate - 건설 일용직 작업조 편성 서버리스 백엔드 (담당자 A).
-  DynamoDB 단일 테이블 + Cognito + API Gateway + 코어 Lambda 5종.
+  CrewMate - 건설 일용직 작업조 편성 서버리스 백엔드 (계약 v2).
+  DynamoDB 엔터티별 테이블 8종 + Cognito + API Gateway + 코어/Agent Lambda.
 
 # ---------------------------------------------------------------------------
 # 파라미터
@@ -14,34 +14,34 @@ Parameters:
     AllowedValues: [dev, prod]
     Description: 배포 스테이지
 
-  # --- Crew Composition Agent (담당자 B) 설정 — 비밀 아님, 기본값 커밋 가능 ---
+  CorsAllowOrigin:
+    Type: String
+    Default: "*"
+    Description: >
+      CORS 허용 오리진. 배포 시 배포된 CloudFront 오리진으로 좁힐 수 있다
+      (예: https://d1872k8ivu18th.cloudfront.net). 기본값은 개발 편의를 위한 전체 허용.
+
+  # --- Crew Composition Agent 설정 (비밀 아님) ---
   CrewAgentModelId:
     Type: String
     Default: apac.anthropic.claude-sonnet-4-6
-    Description: >
-      Amazon Bedrock 모델 ID. Claude Sonnet 4.6 은 교차 리전 추론 프로파일(inference profile)로만
-      호출되므로 지역 프리픽스가 붙은 프로파일 ID 를 지정한다 (ap-northeast-2 배포 → apac.*,
-      us-* 배포 → us.anthropic.claude-sonnet-4-6). Bedrock 모델 액세스는 배포자가 직접 활성화한다.
+    Description: Amazon Bedrock 모델(추론 프로파일) ID.
   CrewAgentRegion:
     Type: String
     Default: ap-northeast-2
-    Description: >
-      Bedrock 호출 리전 (CREW_AGENT_REGION). 추론 프로파일의 지역과 일치해야 한다. 비우면 Lambda
-      자신의 AWS_REGION 을 사용한다.
+    Description: Bedrock 호출 리전 (CREW_AGENT_REGION).
   AgentFallbackEnabled:
     Type: String
     Default: "false"
     AllowedValues: ["true", "false"]
-    Description: >
-      Bedrock 실패/지연 시 사전 준비된 데모 추천으로 폴백할지 여부 (AGENT_FALLBACK_ENABLED).
-      데모 안정성용 — 시연 시 "true" 로 배포할 수 있다.
+    Description: Bedrock 실패 시 사전 준비된 데모 추천으로 폴백할지 여부.
   AgentInvokeTimeoutSeconds:
     Type: String
     Default: "25"
-    Description: 단일 Bedrock compose 호출의 벽시계 상한(초) (AGENT_INVOKE_TIMEOUT_S).
+    Description: 단일 Bedrock compose 호출의 벽시계 상한(초).
 
 # ---------------------------------------------------------------------------
-# 전역 설정 (모든 Lambda 공통)
+# 전역 설정
 # ---------------------------------------------------------------------------
 Globals:
   Function:
@@ -51,73 +51,163 @@ Globals:
     Architectures: [x86_64]
     Environment:
       Variables:
-        TABLE_NAME: !Ref CrewMateTable
+        WORKERS_TABLE: !Ref WorkersTable
+        OFFICES_TABLE: !Ref OfficesTable
+        COMPANIES_TABLE: !Ref CompaniesTable
+        REQUESTS_TABLE: !Ref RequestsTable
+        CREWS_TABLE: !Ref CrewsTable
+        ASSIGNMENTS_TABLE: !Ref AssignmentsTable
+        GAP_EVENTS_TABLE: !Ref GapEventsTable
+        NOTIFICATIONS_TABLE: !Ref NotificationsTable
+        CORS_ALLOW_ORIGIN: !Ref CorsAllowOrigin
         POWERTOOLS_SERVICE_NAME: crewmate
         LOG_LEVEL: INFO
   Api:
     Cors:
       AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
       AllowHeaders: "'Content-Type,Authorization'"
-      AllowOrigin: "'*'"
+      AllowOrigin: !Sub "'${CorsAllowOrigin}'"
 
 Resources:
-  # -------------------------------------------------------------------------
-  # DynamoDB 단일 테이블 (공유 계약 1.4)
-  #   PK/SK + GSI1(OFFICE 기준) + GSI2(COMPANY 기준)
-  # -------------------------------------------------------------------------
-  CrewMateTable:
+  # =========================================================================
+  # DynamoDB 엔터티별 테이블 8종 (계약 v2)
+  # =========================================================================
+  WorkersTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: !Sub "CrewMate-${Stage}"
+      TableName: !Sub "CrewMate-Workers-${Stage}"
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: PK
-          AttributeType: S
-        - AttributeName: SK
-          AttributeType: S
-        - AttributeName: GSI1PK
-          AttributeType: S
-        - AttributeName: GSI1SK
-          AttributeType: S
-        - AttributeName: GSI2PK
-          AttributeType: S
-        - AttributeName: GSI2SK
-          AttributeType: S
+        - { AttributeName: worker_id, AttributeType: S }
+        - { AttributeName: office_id, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
       KeySchema:
-        - AttributeName: PK
-          KeyType: HASH
-        - AttributeName: SK
-          KeyType: RANGE
+        - { AttributeName: worker_id, KeyType: HASH }
       GlobalSecondaryIndexes:
         - IndexName: GSI1
           KeySchema:
-            - AttributeName: GSI1PK
-              KeyType: HASH
-            - AttributeName: GSI1SK
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
+            - { AttributeName: office_id, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  OfficesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "CrewMate-Offices-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: office_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: office_id, KeyType: HASH }
+
+  CompaniesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "CrewMate-Companies-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: company_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: company_id, KeyType: HASH }
+
+  RequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "CrewMate-Requests-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: request_id, AttributeType: S }
+        - { AttributeName: office_id, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+        - { AttributeName: company_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: request_id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: office_id, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
         - IndexName: GSI2
           KeySchema:
-            - AttributeName: GSI2PK
-              KeyType: HASH
-            - AttributeName: GSI2SK
-              KeyType: RANGE
-          Projection:
-            ProjectionType: ALL
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: false
+            - { AttributeName: company_id, KeyType: HASH }
+            - { AttributeName: request_id, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
 
-  # -------------------------------------------------------------------------
-  # Cognito User Pool (F-A1)
-  #   custom claim: role / office_id / company_id
-  # -------------------------------------------------------------------------
+  CrewsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "CrewMate-Crews-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: crew_id, AttributeType: S }
+        - { AttributeName: office_id, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: crew_id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: office_id, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  AssignmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "CrewMate-Assignments-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: crew_id, AttributeType: S }
+        - { AttributeName: worker_id, AttributeType: S }
+        - { AttributeName: created_at, AttributeType: S }
+      KeySchema:
+        - { AttributeName: crew_id, KeyType: HASH }
+        - { AttributeName: worker_id, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: worker_id, KeyType: HASH }
+            - { AttributeName: created_at, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  GapEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "CrewMate-GapEvents-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: event_id, AttributeType: S }
+        - { AttributeName: office_id, AttributeType: S }
+        - { AttributeName: gsi1sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: event_id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: office_id, KeyType: HASH }
+            - { AttributeName: gsi1sk, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+
+  NotificationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "CrewMate-Notifications-${Stage}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: user_id, AttributeType: S }
+        - { AttributeName: sk, AttributeType: S }
+      KeySchema:
+        - { AttributeName: user_id, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+
+  # =========================================================================
+  # Cognito User Pool (username 로그인, custom claim: role/office_id/company_id/region)
+  # =========================================================================
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: !Sub "CrewMate-${Stage}"
-      UsernameAttributes: [email]
-      AutoVerifiedAttributes: [email]
       AdminCreateUserConfig:
         AllowAdminCreateUserOnly: true
       Policies:
@@ -128,24 +218,10 @@ Resources:
           RequireSymbols: false
           RequireUppercase: false
       Schema:
-        - Name: role
-          AttributeDataType: String
-          Mutable: true
-          StringAttributeConstraints:
-            MinLength: "0"
-            MaxLength: "16"
-        - Name: office_id
-          AttributeDataType: String
-          Mutable: true
-          StringAttributeConstraints:
-            MinLength: "0"
-            MaxLength: "64"
-        - Name: company_id
-          AttributeDataType: String
-          Mutable: true
-          StringAttributeConstraints:
-            MinLength: "0"
-            MaxLength: "64"
+        - { Name: role, AttributeDataType: String, Mutable: true, StringAttributeConstraints: { MinLength: "0", MaxLength: "16" } }
+        - { Name: office_id, AttributeDataType: String, Mutable: true, StringAttributeConstraints: { MinLength: "0", MaxLength: "64" } }
+        - { Name: company_id, AttributeDataType: String, Mutable: true, StringAttributeConstraints: { MinLength: "0", MaxLength: "64" } }
+        - { Name: region, AttributeDataType: String, Mutable: true, StringAttributeConstraints: { MinLength: "0", MaxLength: "64" } }
 
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
@@ -155,7 +231,7 @@ Resources:
       GenerateSecret: false
       ExplicitAuthFlows:
         - ALLOW_USER_PASSWORD_AUTH
-        - ALLOW_USER_SRP_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
       AccessTokenValidity: 12
       IdTokenValidity: 12
@@ -163,9 +239,19 @@ Resources:
         AccessToken: hours
         IdToken: hours
 
-  # -------------------------------------------------------------------------
-  # API Gateway (REST) + Cognito Authorizer
-  # -------------------------------------------------------------------------
+  WorkerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: { GroupName: WORKER, UserPoolId: !Ref UserPool }
+  OfficeGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: { GroupName: OFFICE, UserPoolId: !Ref UserPool }
+  CompanyGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties: { GroupName: COMPANY, UserPoolId: !Ref UserPool }
+
+  # =========================================================================
+  # API Gateway (REST) + Cognito Authorizer (기본), 일부 라우트는 공개
+  # =========================================================================
   CrewMateApi:
     Type: AWS::Serverless::Api
     Properties:
@@ -178,10 +264,47 @@ Resources:
             UserPoolArn: !GetAtt UserPool.Arn
         AddDefaultAuthorizerToCorsPreflight: false
 
-  # -------------------------------------------------------------------------
-  # 코어 Lambda 5종
-  #   CodeUri=backend/ 로 shared 패키지를 함께 번들, Handler는 dotted path.
-  # -------------------------------------------------------------------------
+  # =========================================================================
+  # auth Lambda (공개 라우트: signup / login / offices)
+  # =========================================================================
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "crewmate-auth-${Stage}"
+      CodeUri: backend/
+      Handler: functions.auth.app.lambda_handler
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          USER_POOL_CLIENT_ID: !Ref UserPoolClient
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: !Ref OfficesTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CompaniesTable }
+        - DynamoDBReadPolicy: { TableName: !Ref WorkersTable }
+        - Statement:
+            - Effect: Allow
+              Action:
+                - cognito-idp:AdminCreateUser
+                - cognito-idp:AdminSetUserPassword
+                - cognito-idp:AdminAddUserToGroup
+                - cognito-idp:AdminInitiateAuth
+                - cognito-idp:AdminGetUser
+                - cognito-idp:AdminUpdateUserAttributes
+              Resource: !GetAtt UserPool.Arn
+      Events:
+        Signup:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /auth/signup, Method: post, Auth: { Authorizer: NONE } }
+        Login:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /auth/login, Method: post, Auth: { Authorizer: NONE } }
+        ListOffices:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /offices, Method: get, Auth: { Authorizer: NONE } }
+
+  # =========================================================================
+  # worker_api Lambda
+  # =========================================================================
   WorkerApiFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -189,8 +312,12 @@ Resources:
       CodeUri: backend/
       Handler: functions.worker_api.app.lambda_handler
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref CrewMateTable
+        - DynamoDBCrudPolicy: { TableName: !Ref WorkersTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref AssignmentsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CrewsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref RequestsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
       Events:
         CreateApplication:
           Type: Api
@@ -207,10 +334,22 @@ Resources:
         StateInactive:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/state/inactive, Method: post }
+        OfferAccept:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/offer/accept, Method: post }
+        OfferDecline:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/offer/decline, Method: post }
         GetAssignments:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/assignments, Method: get }
+        GetHistory:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/history, Method: get }
 
+  # =========================================================================
+  # company_request Lambda
+  # =========================================================================
   CompanyRequestFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -218,10 +357,12 @@ Resources:
       CodeUri: backend/
       Handler: functions.company_request.app.lambda_handler
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref CrewMateTable
-        - EventBridgePutEventsPolicy:
-            EventBusName: default
+        - DynamoDBCrudPolicy: { TableName: !Ref RequestsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CrewsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref WorkersTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref AssignmentsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
       Events:
         CreateRequest:
           Type: Api
@@ -235,10 +376,19 @@ Resources:
         GetRequest:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/requests/{requestId}", Method: get }
+        Checkin:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/crews/{crewId}/checkin/{workerId}", Method: post }
+        Checkout:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/crews/{crewId}/checkout/{workerId}", Method: post }
         CreateGapEvent:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/crews/{crewId}/gap-events", Method: post }
 
+  # =========================================================================
+  # office_core Lambda
+  # =========================================================================
   OfficeCoreFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -246,16 +396,47 @@ Resources:
       CodeUri: backend/
       Handler: functions.office_core.app.lambda_handler
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref CrewMateTable
+        - DynamoDBCrudPolicy: { TableName: !Ref WorkersTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref RequestsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CrewsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref AssignmentsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
       Events:
         ListWorkers:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /office/workers, Method: get }
+        ListRequests:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /office/requests, Method: get }
+        GetRequest:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/requests/{requestId}", Method: get }
+        RejectRequest:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/requests/{requestId}/reject", Method: post }
         CreateManualCrew:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /office/crews/manual, Method: post }
+        FillGap:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/crews/{crewId}/fill-gap", Method: post }
+        CancelComposition:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/crews/{crewId}/cancel-composition", Method: post }
+        CancelOffer:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /office/cancel-offer, Method: post }
+        ListGapEvents:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /office/gap-events, Method: get }
+        GetGapEvent:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/gap-events/{eventId}", Method: get }
 
+  # =========================================================================
+  # assignment Lambda (승인 / 긴급 승인 — TransactWriteItems)
+  # =========================================================================
   AssignmentFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -263,8 +444,12 @@ Resources:
       CodeUri: backend/
       Handler: functions.assignment.app.lambda_handler
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref CrewMateTable
+        - DynamoDBCrudPolicy: { TableName: !Ref WorkersTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref CrewsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref RequestsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref AssignmentsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
       Events:
         ApproveCrew:
           Type: Api
@@ -273,6 +458,9 @@ Resources:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/emergency/{eventId}/approve", Method: post }
 
+  # =========================================================================
+  # notification Lambda
+  # =========================================================================
   NotificationFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -280,25 +468,23 @@ Resources:
       CodeUri: backend/
       Handler: functions.notification.app.lambda_handler
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref CrewMateTable
+        - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
       Events:
         ListNotifications:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /notifications, Method: get }
+        ReadNotifications:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /notifications/read, Method: post }
 
-  # -------------------------------------------------------------------------
-  # Crew Composition Agent 스택 (담당자 B)
-  #   - AgentDepsLayer: pydantic + strands-agents (A의 5개 함수엔 부착하지 않음)
-  #   - AgentInvokeFunction: NORMAL(ComposeRequested EventBridge) + EMERGENCY(내부 invoke)
-  #   - GapEventFunction: GapEventDetected EventBridge 컨슈머 → agent_invoke 동기 invoke
-  #   두 함수 모두 API Gateway 라우트가 없다(이벤트/내부 invoke 트리거).
-  # -------------------------------------------------------------------------
+  # =========================================================================
+  # Crew Composition Agent 스택 (NORMAL agent-compose / EMERGENCY agent-recompose)
+  # =========================================================================
   AgentDepsLayer:
     Type: AWS::Serverless::LayerVersion
     Properties:
       LayerName: !Sub "crewmate-agent-deps-${Stage}"
-      Description: pydantic + strands-agents for 담당자 B's agent Lambdas
+      Description: pydantic + strands-agents for the Crew Composition Agent
       ContentUri: layers/agent_deps/
       CompatibleRuntimes: [python3.12]
       RetentionPolicy: Delete
@@ -311,7 +497,6 @@ Resources:
       FunctionName: !Sub "crewmate-agent-invoke-${Stage}"
       CodeUri: backend/
       Handler: functions.agent_invoke.app.lambda_handler
-      # Bedrock compose (up to 2 attempts × AGENT_INVOKE_TIMEOUT_S) + assembly/validation.
       Timeout: 60
       MemorySize: 512
       Layers:
@@ -323,9 +508,11 @@ Resources:
           AGENT_FALLBACK_ENABLED: !Ref AgentFallbackEnabled
           AGENT_INVOKE_TIMEOUT_S: !Ref AgentInvokeTimeoutSeconds
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref CrewMateTable
-        # Bedrock InvokeModel on foundation models + cross-Region inference profiles.
+        - DynamoDBCrudPolicy: { TableName: !Ref CrewsTable }
+        - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref RequestsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref WorkersTable }
+        - DynamoDBReadPolicy: { TableName: !Ref AssignmentsTable }
         - Statement:
             - Effect: Allow
               Action:
@@ -335,67 +522,39 @@ Resources:
                 - "arn:aws:bedrock:*::foundation-model/*"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
       Events:
-        # NORMAL trigger: an OFFICE-authorized 담당자 A route publishes this when a
-        # WorkRequest is ready for AI composition (see agent_invoke/handler.py contract).
-        ComposeRequested:
-          Type: EventBridgeRule
-          Properties:
-            Pattern:
-              source: ["crewmate.office"]
-              detail-type: ["ComposeRequested"]
-
-  GapEventFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub "crewmate-gap-event-${Stage}"
-      CodeUri: backend/
-      Handler: functions.gap_event.app.lambda_handler
-      # Synchronously invokes AgentInvokeFunction (RequestResponse), which itself may take up
-      # to ~2×AGENT_INVOKE_TIMEOUT_S, so this must comfortably exceed AgentInvoke's timeout.
-      Timeout: 120
-      MemorySize: 256
-      Layers:
-        - !Ref AgentDepsLayer
-      Environment:
-        Variables:
-          AGENT_INVOKE_FUNCTION_NAME: !Ref AgentInvokeFunction
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref CrewMateTable
-        # Trusted internal invoke of agent_invoke (the IAM boundary that authorizes the
-        # EMERGENCY internal path — see gap_event/handler.py).
-        - LambdaInvokePolicy:
-            FunctionName: !Ref AgentInvokeFunction
-      Events:
-        # EMERGENCY trigger: 담당자 A's company_request publishes GapEventDetected after
-        # creating the GapEvent (DETECTED). Detail = {event_id, office_id, crew_id,
-        # request_id, gap_type, missing_worker_ids}.
-        GapEventDetected:
-          Type: EventBridgeRule
-          Properties:
-            Pattern:
-              source: ["crewmate.company"]
-              detail-type: ["GapEventDetected"]
+        AgentCompose:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/requests/{requestId}/agent-compose", Method: post }
+        AgentRecompose:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/gap-events/{eventId}/agent-recompose", Method: post }
 
 # ---------------------------------------------------------------------------
-# 출력값 (프론트/시드 스크립트/팀원 연동용)
+# 출력값
 # ---------------------------------------------------------------------------
 Outputs:
   ApiUrl:
     Description: API Gateway 엔드포인트
     Value: !Sub "https://${CrewMateApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}"
-  TableName:
-    Description: DynamoDB 단일 테이블 이름
-    Value: !Ref CrewMateTable
   UserPoolId:
     Description: Cognito User Pool ID
     Value: !Ref UserPool
   UserPoolClientId:
     Description: Cognito User Pool Client ID
     Value: !Ref UserPoolClient
-  AgentInvokeFunctionName:
-    Description: Crew Composition Agent invoke Lambda (EventBridge ComposeRequested + internal invoke)
-    Value: !Ref AgentInvokeFunction
-  GapEventFunctionName:
-    Description: Gap event consumer Lambda (EventBridge GapEventDetected)
-    Value: !Ref GapEventFunction
+  WorkersTableName:
+    Value: !Ref WorkersTable
+  OfficesTableName:
+    Value: !Ref OfficesTable
+  CompaniesTableName:
+    Value: !Ref CompaniesTable
+  RequestsTableName:
+    Value: !Ref RequestsTable
+  CrewsTableName:
+    Value: !Ref CrewsTable
+  AssignmentsTableName:
+    Value: !Ref AssignmentsTable
+  GapEventsTableName:
+    Value: !Ref GapEventsTable
+  NotificationsTableName:
+    Value: !Ref NotificationsTable
