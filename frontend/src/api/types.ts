@@ -212,6 +212,7 @@ export interface Recommendation {
   total_cost: number;
   reason: string;
   considerations: string[];
+  fitness?: number; // 적합도(0~100). AI 추천안의 종합 매치 점수.
 }
 
 export interface Crew {

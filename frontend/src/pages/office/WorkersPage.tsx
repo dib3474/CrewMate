@@ -14,11 +14,11 @@ const TRADE_OPTIONS: { value: Trade | ''; label: string }[] = [
 ];
 
 const TRADE_LABEL: Record<string, string> = {
-  FORMWORK: '형틀목공',
-  REBAR: '철근공',
-  MASONRY: '조적공',
-  MATERIAL_CARRY: '자재운반',
-  GENERAL: '보통인부',
+  FORMWORK: '🪵 형틀목공',
+  REBAR: '🔩 철근공',
+  MASONRY: '🧱 조적공',
+  MATERIAL_CARRY: '📦 자재운반',
+  GENERAL: '👷 보통인부',
 };
 
 const STATE_CONFIG: Record<WorkerState, { label: string; color: string }> = {

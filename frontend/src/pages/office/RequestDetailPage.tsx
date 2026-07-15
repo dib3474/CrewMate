@@ -11,8 +11,8 @@ const STATUS_LABEL: Record<string, string> = {
   COMPLETED: '완료', CANCELLED: '취소', NOTIFIED: '수락 대기', DRAFT: '임시', REJECTED: '거절됨',
 };
 const TRADE_LABEL: Record<string, string> = {
-  FORMWORK: '형틀목공', REBAR: '철근공', MASONRY: '조적공',
-  MATERIAL_CARRY: '자재운반', GENERAL: '보통인부', ANY: '직종 무관',
+  FORMWORK: '🪵 형틀목공', REBAR: '🔩 철근공', MASONRY: '🧱 조적공',
+  MATERIAL_CARRY: '📦 자재운반', GENERAL: '👷 보통인부', ANY: '🔀 직종 무관',
 };
 const PRIORITY_LABEL: Record<number, string> = { 1: '1순위', 2: '2순위', 3: '3순위' };
 const ACCEPTANCE_CONFIG: Record<AcceptanceStatus, { label: string; color: string }> = {
@@ -150,7 +150,10 @@ export default function OfficeRequestDetailPage() {
   return (
     <div className="max-w-3xl mx-auto space-y-5">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-gray-800">{detail.site_name}</h2>
+        <div>
+          <h2 className="text-xl font-semibold text-gray-800">{detail.site_name}</h2>
+          {detail.company_name && <p className="text-sm text-gray-500 mt-0.5">🏢 {detail.company_name}</p>}
+        </div>
         <button onClick={() => navigate('/office')} className="text-sm text-gray-500 hover:text-gray-800">← 목록으로</button>
       </div>
 
@@ -286,7 +289,14 @@ export default function OfficeRequestDetailPage() {
                 selectedRank === idx ? 'border-indigo-500 shadow-md' : 'border-gray-200 hover:border-indigo-300'
               }`}>
               <div className="flex items-center justify-between mb-3">
-                <span className="text-sm font-bold text-indigo-700">AI 추천 {rec.rank}안</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-bold text-indigo-700">AI 추천 {rec.rank}안</span>
+                  {typeof rec.fitness === 'number' && (
+                    <span className="text-xs font-medium bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">
+                      적합도 {rec.fitness}%
+                    </span>
+                  )}
+                </div>
                 <span className="text-sm font-medium text-gray-800">{rec.total_cost.toLocaleString()}원</span>
               </div>
               <div className="space-y-1.5 mb-3">

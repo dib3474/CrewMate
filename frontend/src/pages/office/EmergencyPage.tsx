@@ -3,10 +3,12 @@ import { useParams, useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { api } from '../../api/client';
 import type { GapEvent, Crew, WorkRequest, Recommendation, CrewMember, Worker, Trade } from '../../api/types';
+import { tradeMeta } from '../../lib/trades';
+import { commaInputValue, parseDigits } from '../../lib/format';
 
 const TRADE_LABEL: Record<string, string> = {
-  FORMWORK: '형틀목공', REBAR: '철근공', MASONRY: '조적공',
-  MATERIAL_CARRY: '자재운반', GENERAL: '보통인부', ANY: '직종 무관',
+  FORMWORK: '🪵 형틀목공', REBAR: '🔩 철근공', MASONRY: '🧱 조적공',
+  MATERIAL_CARRY: '📦 자재운반', GENERAL: '👷 보통인부', ANY: '🔀 직종 무관',
 };
 
 const ALL_TRADES: Trade[] = ['FORMWORK', 'REBAR', 'MASONRY', 'MATERIAL_CARRY', 'GENERAL'];
@@ -233,7 +235,14 @@ export default function EmergencyPage() {
             <div key={rec.rank} onClick={() => setSelectedRank(idx)}
               className={`bg-white rounded-lg border-2 p-5 cursor-pointer transition-all ${selectedRank === idx ? 'border-indigo-500 shadow-md' : 'border-gray-200 hover:border-indigo-300'}`}>
               <div className="flex items-center justify-between mb-3">
-                <span className="text-sm font-bold text-indigo-700">대체 {rec.rank}안</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-bold text-indigo-700">대체 {rec.rank}안</span>
+                  {typeof rec.fitness === 'number' && (
+                    <span className="text-xs font-medium bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">
+                      적합도 {rec.fitness}%
+                    </span>
+                  )}
+                </div>
                 <span className="text-sm font-medium text-gray-800">+{rec.total_cost.toLocaleString()}원</span>
               </div>
               <div className="space-y-1.5 mb-3">
@@ -296,7 +305,7 @@ export default function EmergencyPage() {
                 {manualSelected.map((s) => {
                   const w = candidates.find((c) => c.worker_id === s.worker_id)!;
                   return (
-                    <div key={s.worker_id} className="flex items-center gap-3 bg-white rounded p-2">
+                    <div key={s.worker_id} className="flex flex-wrap items-center gap-2 bg-white rounded p-2">
                       <span className="font-medium text-sm text-gray-800 w-16">{w.name}</span>
                       <select value={s.assigned_trade} onChange={(e) => updateMember(s.worker_id, 'assigned_trade', e.target.value)}
                         className="border border-gray-300 rounded px-2 py-1 text-sm">
@@ -304,8 +313,8 @@ export default function EmergencyPage() {
                           <option key={t} value={t}>{TRADE_LABEL[t]}{w.preferred_trades.includes(t) ? ' ★' : ''}</option>
                         ))}
                       </select>
-                      <input type="text" inputMode="numeric" value={s.offered_wage || ''}
-                        onChange={(e) => { const v = e.target.value.replace(/[^0-9]/g, ''); updateMember(s.worker_id, 'offered_wage', v ? Number(v) : 0); }}
+                      <input type="text" inputMode="numeric" value={commaInputValue(s.offered_wage)}
+                        onChange={(e) => updateMember(s.worker_id, 'offered_wage', parseDigits(e.target.value))}
                         className="w-28 border border-gray-300 rounded px-2 py-1 text-sm" />
                       <span className="text-xs text-gray-400">원</span>
                       <button onClick={() => setManualSelected(manualSelected.filter((x) => x.worker_id !== s.worker_id))}
@@ -317,9 +326,9 @@ export default function EmergencyPage() {
             </div>
           )}
 
-          {/* 후보 테이블 */}
-          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-            <table className="w-full text-sm">
+          {/* 후보 테이블 (모바일: 가로 스크롤) */}
+          <div className="bg-white rounded-lg border border-gray-200 overflow-x-auto">
+            <table className="w-full text-sm min-w-[480px]">
               <thead className="bg-gray-50 border-b border-gray-200">
                 <tr>
                   <th className="w-10 px-4 py-3"></th>
@@ -345,7 +354,7 @@ export default function EmergencyPage() {
                       <td className="px-4 py-3 text-gray-600">
                         <div className="flex flex-wrap gap-1">
                           {w.preferred_trades.map((t) => (
-                            <span key={t} className="text-xs bg-green-50 text-green-700 px-1.5 py-0.5 rounded">{TRADE_LABEL[t]}</span>
+                            <span key={t} className={`text-xs px-1.5 py-0.5 rounded ${tradeMeta(t).badge}`}>{tradeMeta(t).emoji} {tradeMeta(t).label}</span>
                           ))}
                         </div>
                       </td>

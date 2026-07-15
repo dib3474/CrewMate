@@ -3,14 +3,15 @@ import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { api } from '../../api/client';
 import type { CreateWorkRequestPayload, Priority, PriorityAxis, PriorityRank, RequiredTrade, RequiredWorker, WorkRequest, Office } from '../../api/types';
+import { commaInputValue, parseDigits } from '../../lib/format';
 
 const TRADE_OPTIONS: { value: RequiredTrade; label: string }[] = [
-  { value: 'ANY', label: '직종 무관' },
-  { value: 'FORMWORK', label: '형틀목공' },
-  { value: 'REBAR', label: '철근공' },
-  { value: 'MASONRY', label: '조적공' },
-  { value: 'MATERIAL_CARRY', label: '자재운반' },
-  { value: 'GENERAL', label: '보통인부' },
+  { value: 'ANY', label: '🔀 직종 무관' },
+  { value: 'FORMWORK', label: '🪵 형틀목공' },
+  { value: 'REBAR', label: '🔩 철근공' },
+  { value: 'MASONRY', label: '🧱 조적공' },
+  { value: 'MATERIAL_CARRY', label: '📦 자재운반' },
+  { value: 'GENERAL', label: '👷 보통인부' },
 ];
 
 const PRIORITY_META: Record<PriorityAxis, { label: string; icon: string; hint: string }> = {
@@ -270,13 +271,10 @@ export default function CreateRequestPage() {
             type="text"
             inputMode="numeric"
             required
-            value={form.budget || ''}
-            onChange={(e) => {
-              const v = e.target.value.replace(/[^0-9]/g, '');
-              setForm({ ...form, budget: v ? Number(v) : 0 });
-            }}
+            value={commaInputValue(form.budget)}
+            onChange={(e) => setForm({ ...form, budget: parseDigits(e.target.value) })}
             className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
-            placeholder="500000"
+            placeholder="500,000"
           />
           <p className="text-xs text-gray-400 mt-1">{form.budget ? form.budget.toLocaleString() + '원' : ''}</p>
         </div>

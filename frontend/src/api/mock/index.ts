@@ -442,7 +442,10 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
 
   'GET /office/requests': async () => {
     await delay(150);
-    return { success: true, data: mockState.requests.filter((r) => r.office_id === 'OFFICE001') };
+    const items = mockState.requests
+      .filter((r) => r.office_id === 'OFFICE001')
+      .map((r) => ({ ...r, company_name: companyName(r.company_id) }));
+    return { success: true, data: items };
   },
 
   'GET /office/requests/{id}': async (_body, requestId?: string) => {
@@ -457,7 +460,7 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
         return { ...m, worker_state: w?.state || 'INACTIVE' };
       }),
     } : null;
-    return { success: true, data: { ...request, crew: crewWithState } };
+    return { success: true, data: { ...request, company_name: companyName(request.company_id), crew: crewWithState } };
   },
 
   // office가 요청 거절
@@ -737,6 +740,7 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
           total_cost: costTotal,
           reason: `${reasons.join(', ')} 기준으로 구성한 ${rankCounter}안입니다.`,
           considerations: reasons,
+          fitness: computeFitness(members, request.budget, request.priority),
         });
         rankCounter++;
       }
@@ -903,6 +907,7 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
           total_cost: cost,
           reason: `잔여 팀원과의 협업 및 예산(${remainingBudget > 0 ? remainingBudget.toLocaleString() + '원 이내' : '제한 없음'})을 고려한 긴급 대체 ${rankCounter}안입니다.`,
           considerations: ['잔여 팀원 유지', '결원 직종 충족', rankCounter === 1 ? '최저 비용' : '경력 균형'],
+          fitness: computeFitness(picked, remainingBudget, request.priority),
         });
         rankCounter++;
       }
@@ -1072,6 +1077,34 @@ function assignAnyTrade(w: Worker): Trade | null {
   if (pref) return pref;
   if (!excluded.includes('GENERAL')) return 'GENERAL';
   return ALL_TRADES.find((t) => !excluded.includes(t)) || null;
+}
+
+// company_id(=userId)로 건설사 이름 조회 (office 화면 표시용, C-14).
+function companyName(companyId: string | undefined): string {
+  if (!companyId) return '';
+  for (const acc of Object.values(SEED_ACCOUNTS)) {
+    if (acc.user.userId === companyId) return acc.user.name;
+  }
+  return companyId;
+}
+
+// 추천안 적합도(0~100) 계산 — 우선순위(비용/경력/팀워크) 가중. mock 데모용 근사.
+function computeFitness(
+  members: { offered_wage: number; career_years?: number }[],
+  budget: number,
+  priority: { cost: number; career: number; teamwork: number } | undefined,
+): number {
+  if (members.length === 0) return 0;
+  const rank = priority || { cost: 2, career: 2, teamwork: 2 };
+  const raw = { cost: 4 - rank.cost, career: 4 - rank.career, teamwork: 4 - rank.teamwork };
+  const tot = raw.cost + raw.career + raw.teamwork || 1;
+  const w = { cost: raw.cost / tot, career: raw.career / tot, teamwork: raw.teamwork / tot };
+  const totalCost = members.reduce((s, m) => s + m.offered_wage, 0);
+  const costS = budget > 0 ? Math.max(0, Math.min(1, 1 - totalCost / budget)) : 0.6;
+  const avgCareer = members.reduce((s, m) => s + (m.career_years || 0), 0) / members.length;
+  const careerS = Math.min(avgCareer / 15, 1);
+  const teamS = 0; // mock: 협업 이력 미집계
+  return Math.round((w.cost * costS + w.career * careerS + w.teamwork * teamS) * 100);
 }
 
 // 결원 이벤트 생성 (멤버 상실 시 AI/수동 재편성 경로를 열어준다).
