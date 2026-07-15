@@ -206,6 +206,7 @@ def checkin(event, principal: Principal, params):
         txn.worker_entry(
             worker_id, now=now, to_state=WorkerState.RUNNING,
             from_states=[WorkerState.RESERVED], current_crew_id=crew_id,
+            inc_attended=True,   # 출근(체크인) 수 +1
         ),
         txn.assignment_update_entry(crew_id, worker_id, now=now, status=AssignmentStatus.RUNNING),
     ]
@@ -226,14 +227,35 @@ def checkout(event, principal: Principal, params):
     if worker["state"] != WorkerState.RUNNING:
         raise ApiError(ErrorCode.STATE_CONFLICT, "퇴근 처리는 작업중(RUNNING) 상태에서만 가능합니다.")
 
+    # 퇴근 시 별점(1~5) 평가. 미제공 시 평점 집계 없이 퇴근만 처리.
+    body = parse_body(event)
+    rating = _parse_rating(body.get("rating"))
+
     now = now_iso()
     entries = [
-        txn.worker_inactive_entry(worker_id, now, inc_completed=True),
+        txn.worker_entry(
+            worker_id, now=now, to_state=WorkerState.INACTIVE,
+            current_offer=None, current_crew_id=None,
+            inc_completed=True, add_rating=rating,
+        ),
         txn.assignment_update_entry(crew_id, worker_id, now=now, status=AssignmentStatus.COMPLETED),
     ]
     _run(entries, "퇴근")
     _rollup_completed(crew)
     return success(_worker_company_response(worker_id))
+
+
+def _parse_rating(value: Any) -> int | None:
+    """퇴근 시 별점 검증 (1~5 정수). None/미제공이면 집계 안 함."""
+    if value in (None, ""):
+        return None
+    try:
+        rating = int(value)
+    except (ValueError, TypeError):
+        raise ApiError(ErrorCode.VALIDATION_ERROR, "평점은 1~5 정수여야 합니다.")
+    if not 1 <= rating <= 5:
+        raise ApiError(ErrorCode.VALIDATION_ERROR, "평점은 1~5 정수여야 합니다.")
+    return rating
 
 
 # ---------------------------------------------------------------------------

@@ -115,11 +115,27 @@ def _apply_filters(workers, qp):
 # ---------------------------------------------------------------------------
 # 요청 조회 / 거절
 # ---------------------------------------------------------------------------
+_company_name_cache: dict[str, str] = {}
+
+
+def _company_name(company_id: str | None) -> str:
+    """요청한 건설사 이름 (office 화면 표시용). 캐시로 반복 조회 완화."""
+    if not company_id:
+        return ""
+    if company_id not in _company_name_cache:
+        company = db.get_company(company_id) or {}
+        _company_name_cache[company_id] = company.get("name") or company_id
+    return _company_name_cache[company_id]
+
+
 @router.route("GET", "/office/requests")
 def list_requests(_event, principal: Principal, _params):
     principal.require_role(Role.OFFICE)
     items = db.query_office_requests(principal.office_id)
-    return success([request_view(r) for r in items])
+    return success([
+        {**request_view(r), "company_name": _company_name(r.get("company_id"))}
+        for r in items
+    ])
 
 
 @router.route("GET", "/office/requests/{requestId}")
@@ -130,6 +146,7 @@ def get_request(_event, principal: Principal, params):
         raise ApiError(ErrorCode.REQUEST_NOT_FOUND, "요청을 찾을 수 없습니다.")
     principal.require_office(req["office_id"])
     result = request_view(req)
+    result["company_name"] = _company_name(req.get("company_id"))
     result["crew"] = _active_crew_view(req["request_id"])
     return success(result)
 

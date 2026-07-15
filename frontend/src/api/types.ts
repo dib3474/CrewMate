@@ -101,6 +101,11 @@ export interface Worker {
   certifications: string[];
   completed_count: number;
   no_show_count: number;
+  // 평점(5점 만점 평균)·출근 수·배차완료 수 (본인/사무소 응답에 노출)
+  rating?: number | null;
+  rating_count?: number;
+  attended_count?: number;
+  dispatched_count?: number;
   current_crew_id: string | null;
   // 현재 배정 제안 정보 (NOTIFIED 상태일 때)
   current_offer?: {
@@ -159,8 +164,33 @@ export interface WorkRequest {
   status: WorkRequestStatus;
   rejection_reason?: string;
   declined_worker_ids?: string[];
+  company_name?: string; // office 화면에서 요청한 건설사 표시용
   created_at: string;
   updated_at: string;
+}
+
+// 근로자가 수락한 작업 이력 (대시보드)
+export interface AcceptedJob {
+  crew_id: string;
+  request_id: string;
+  site_name: string;
+  work_date: string;
+  start_time: string;
+  location_text: string;
+  assigned_trade: Trade;
+  offered_wage: number;
+  status: string;
+  accepted_at: string;
+}
+
+// 출근일 히트맵: work_date -> 출근 횟수
+export type AttendanceMap = Record<string, number>;
+
+// 경력 연차별 평균 희망 일당
+export interface WageStats {
+  career_years: number;
+  average_wage: number | null;
+  sample_count: number;
 }
 
 export interface CrewMember {

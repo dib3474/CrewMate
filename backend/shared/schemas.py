@@ -134,6 +134,9 @@ def build_worker(
     state: str = WorkerState.INACTIVE,
     completed_count: int = 0,
     dispatched_count: int = 0,
+    attended_count: int = 0,
+    rating_sum: int = 0,
+    rating_count: int = 0,
 ) -> dict[str, Any]:
     wid = worker_id or new_id()
     ts = now_iso()
@@ -153,7 +156,10 @@ def build_worker(
         "desired_daily_wage": desired_daily_wage,
         "certifications": certifications or [],
         "completed_count": completed_count,
-        "dispatched_count": dispatched_count,
+        "dispatched_count": dispatched_count,   # 배차완료(수락 확정) 수
+        "attended_count": attended_count,       # 출근(체크인) 수
+        "rating_sum": rating_sum,               # 평점 합계(내부 누적)
+        "rating_count": rating_count,           # 평점 개수(내부 누적)
         "current_crew_id": None,
         "current_offer": None,
         "state_changed_at": ts,
@@ -163,26 +169,31 @@ def build_worker(
     return to_decimal(item)
 
 
-_WORKER_INTERNAL_KEYS = frozenset({"gsi1sk"})
-# 성실도 비율(완료/배차)의 분모는 사무소 화면 한정. 본인 응답에는 completed_count(내가 한 완료 작업 수)만
-# 노출하고 dispatched_count(배차 확정 수, 비율 계산용)는 제외한다.
-_WORKER_SELF_HIDDEN_KEYS = frozenset({"dispatched_count"})
+_WORKER_INTERNAL_KEYS = frozenset({"gsi1sk", "rating_sum"})
+
+
+def rating_average(worker: dict[str, Any]) -> float | None:
+    """평점 평균(5점 만점, 소수 1자리). 평점이 없으면 None."""
+    count = int(worker.get("rating_count", 0) or 0)
+    if count <= 0:
+        return None
+    total = int(worker.get("rating_sum", 0) or 0)
+    return round(total / count, 1)
 
 
 def worker_office_view(worker: dict[str, Any], work_history: list | None = None) -> dict[str, Any]:
-    """OFFICE 응답용: 성실도 카운트(completed/dispatched) 포함, 내부 GSI 키만 제거."""
+    """OFFICE 응답용: 성실도 카운트(completed/dispatched)·평점 포함, 내부 키만 제거."""
     view = {k: clean(v) for k, v in worker.items() if k not in _WORKER_INTERNAL_KEYS}
+    view["rating"] = rating_average(worker)
     view["work_history"] = clean(work_history or [])
     return view
 
 
 def worker_self_view(worker: dict[str, Any], work_history: list | None = None) -> dict[str, Any]:
-    """WORKER 본인 응답용: completed_count(완료 작업 수)만 노출, dispatched_count(성실도 분모) 제외."""
-    view = {
-        k: clean(v)
-        for k, v in worker.items()
-        if k not in _WORKER_INTERNAL_KEYS and k not in _WORKER_SELF_HIDDEN_KEYS
-    }
+    """WORKER 본인 응답용: 평점(rating)·출근 수(attended_count)·배차완료 수(dispatched_count)·
+    완료 수(completed_count)를 노출한다. rating_sum(내부 누적)만 숨긴다."""
+    view = {k: clean(v) for k, v in worker.items() if k not in _WORKER_INTERNAL_KEYS}
+    view["rating"] = rating_average(worker)
     view["work_history"] = clean(work_history or [])
     return view
 
