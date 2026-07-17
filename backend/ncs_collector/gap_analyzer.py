@@ -90,7 +90,7 @@ def analyze_gap(applicant: ApplicantSpecInput, repository: RuleRepository) -> St
             priority=len(actions) + 1,
             item_name=ability.ability_name,
             item_type="ABILITY",
-            reason=f"직종 요구 NCS 능력 보완 ({ability.ncs_code})",
+            reason="직종에서 요구하는 능력 보완",
         ))
     for group in recommended:
         if not group.satisfied:

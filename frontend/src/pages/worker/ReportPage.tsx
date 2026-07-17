@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { api } from '../../api/client';
 import type { SpecReportJobStart, SpecReportJobState, SpecReportRequest, SpecReportResponse, Trade, Worker } from '../../api/types';
+import MarkdownReport, { humanizeReportText } from '../../components/MarkdownReport';
 
 const LAST_REPORT_JOB_KEY = 'crewmate:last-spec-report-job';
 
@@ -169,7 +170,7 @@ export default function ReportPage() {
                 {result.report.priorityActions.map((action) => (
                   <li key={`${action.priority}-${action.itemName}`} className="flex gap-3 text-sm">
                     <span className="shrink-0 w-6 h-6 rounded-full bg-green-100 text-green-700 flex items-center justify-center font-semibold">{action.priority}</span>
-                    <div><p className="font-medium text-gray-800">{action.itemName}</p><p className="text-gray-500">{action.reason}</p></div>
+                    <div><p className="font-medium text-gray-800">{humanizeReportText(action.itemName)}</p><p className="text-gray-500">{humanizeReportText(action.reason)}</p></div>
                   </li>
                 ))}
               </ol>
@@ -179,7 +180,7 @@ export default function ReportPage() {
           {result.markdown ? (
             <section className="bg-white rounded-lg border border-gray-200 p-6">
               <h3 className="font-semibold text-gray-800 mb-4">전체 보고서</h3>
-              <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-7 text-gray-700">{result.markdown}</pre>
+              <MarkdownReport markdown={result.markdown} />
             </section>
           ) : (
             <section className="bg-white rounded-lg border border-gray-200 p-6">

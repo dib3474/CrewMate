@@ -23,7 +23,7 @@ from ncs_collector.rag_ready import build_rag_ready
 from ncs_collector.trade_requirements import LocalRuleRepository
 from spec_report.orchestrator import SpecReportService, build_evidence_plan
 from spec_report.qnet import QNetQualificationService
-from spec_report.rendering import build_fallback_report, materialize_agent_report
+from spec_report.rendering import build_fallback_report, materialize_agent_report, render_markdown
 from spec_report.report_agent import ReportAgentRunner
 from spec_report.retrieval import LocalKeywordRetriever
 from spec_report.validator import ReportValidationError, validate_report
@@ -299,3 +299,27 @@ def test_runner_uses_strands_structured_output_model():
     result = runner.run(analyze_gap(_applicant(), REPO), [])
     assert result is draft
     assert agent.kwargs["structured_output_model"] is AgentReportDraft
+
+
+def test_markdown_hides_ncs_codes_and_uses_clickable_qnet_link():
+    structured = analyze_gap(_applicant(), REPO)
+    code = structured.missing_abilities[0].ncs_code
+    structured.priority_actions[0].reason = f"직종 요구 NCS 능력 보완 ({code})"
+    qnet_url = "https://www.q-net.or.kr/official"
+    report = build_fallback_report(
+        structured,
+        {},
+        {"방수기능사": QualificationEvidence(
+            normalized_name="방수기능사",
+            official_name="방수기능사",
+            source_url=qnet_url,
+            checked_at="2026-07-17T00:00:00+09:00",
+            fetch_status="SUCCESS",
+        )},
+    )
+
+    markdown = render_markdown(report)
+
+    assert code not in markdown
+    assert f"[Q-Net 공식 페이지]({qnet_url})" in markdown
+    assert report.report_id not in markdown

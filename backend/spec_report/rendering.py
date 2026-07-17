@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from uuid import uuid4
 
 from ncs_collector.models import (
@@ -16,6 +17,17 @@ from ncs_collector.models import (
     StructuredGapAnalysis,
 )
 from ncs_collector.text import comparison_key
+
+
+_NCS_CODE = re.compile(r"\s*\(?\b\d{8,12}_\d+(?:v\d+)?\b\)?", re.IGNORECASE)
+
+
+def _user_facing(value: object) -> str:
+    """Remove internal NCS identifiers from prose while preserving structured JSON fields."""
+    text = _NCS_CODE.sub("", str(value or ""))
+    text = re.sub(r"\(\s*\)", "", text)
+    text = re.sub(r"\s+—\s*$", "", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 def build_fallback_report(
@@ -170,14 +182,14 @@ def render_markdown(report: SpecGapReport) -> str:
         return ", ".join(values) if values else "없음"
 
     lines = [
-        f"# 지원자 스펙 Gap 보고서 ({report.report_id})",
+        "# 지원자 스펙 보완 보고서",
         "",
         "## 1. 종합 의견",
         f"- {report.target_trade} 기준 능력 커버리지: {report.ability_coverage.matched}/{report.ability_coverage.required} ({report.ability_coverage.percentage}%)",
         f"- 부족 핵심 자격그룹: {names(report.missing_core_certification_groups)}",
         "",
         "## 2. 분석 범위",
-        f"- {report.analysis_scope}",
+        f"- {_user_facing(report.analysis_scope)}",
         f"- 세부 작업: {report.target_specialty or '미지정'}",
         "",
         "## 3. 지원자 보유 스펙",
@@ -199,27 +211,48 @@ def render_markdown(report: SpecGapReport) -> str:
         "",
         "## 8. 우선 보완 계획",
     ]
-    lines.extend(f"{item.priority}. {item.item_name} — {item.reason}" for item in report.priority_actions)
-    lines.extend(["", "## 9. Q-Net 공식 확인 결과"])
     lines.extend(
-        f"- {item.normalized_name}: {item.fetch_status} ({item.source_url or 'URL 없음'}, {item.checked_at or '확인 시각 없음'})"
-        for item in report.qnet_evidence
+        f"{item.priority}. {_user_facing(item.item_name)} — {_user_facing(item.reason)}"
+        for item in report.priority_actions
     )
+    lines.extend(["", "## 9. Q-Net 공식 확인 결과"])
+    status_labels = {
+        "SUCCESS": "공식 정보 확인",
+        "NAME_MISMATCH": "자격명 확인 필요",
+        "UNAVAILABLE": "현재 확인 불가",
+        "FAILED": "확인 실패",
+        "NOT_FOUND": "공식 페이지 미확인",
+    }
+    for item in report.qnet_evidence:
+        status = status_labels.get(item.fetch_status, "확인 필요")
+        source = (
+            f"[Q-Net 공식 페이지]({item.source_url})"
+            if item.source_url else "공식 페이지 확인 필요"
+        )
+        checked = item.checked_at or "확인 시각 없음"
+        lines.append(f"- {_user_facing(item.normalized_name)}: {status} · {source} · {checked}")
     if not report.qnet_evidence:
         lines.append("- 확인 결과 없음")
     lines.extend(["", "## 10. Bedrock Knowledge Base 근거"])
-    lines.extend(f"- {item.item_name}: {item.reason}" for item in report.knowledge_base_evidence)
+    lines.extend(
+        f"- {_user_facing(item.item_name)}: {_user_facing(item.reason)}"
+        for item in report.knowledge_base_evidence
+    )
     if not report.knowledge_base_evidence:
         lines.append("- 검색 결과 없음")
     lines.extend(["", "## 11. 근거 및 출처"])
-    lines.extend(
-        f"- {item.item_name}: {item.source_type} / {item.document_id or '-'} / {item.source_url or '-'}"
-        for item in report.citations
-    )
+    for item in report.citations:
+        if item.source_type == "QNET" and item.source_url:
+            source = f"[Q-Net 공식 페이지]({item.source_url})"
+        elif item.source_url and str(item.source_url).startswith(("http://", "https://")):
+            source = f"[원문 보기]({item.source_url})"
+        else:
+            source = "내부 기준 문서"
+        lines.append(f"- {_user_facing(item.item_name)}: {source}")
     if not report.citations:
         lines.append("- 연결된 외부 출처 없음")
     lines.extend(["", "## 12. 주의사항과 확인 필요 항목"])
-    lines.extend(f"- 충돌: {item}" for item in report.conflicts)
-    lines.extend(f"- 한계: {item}" for item in report.limitations)
-    lines.extend(f"- 확인 필요: {item}" for item in report.human_review_items)
+    lines.extend(f"- 충돌: {_user_facing(item)}" for item in report.conflicts)
+    lines.extend(f"- 한계: {_user_facing(item)}" for item in report.limitations)
+    lines.extend(f"- 확인 필요: {_user_facing(item)}" for item in report.human_review_items)
     return "\n".join(lines).rstrip() + "\n"
