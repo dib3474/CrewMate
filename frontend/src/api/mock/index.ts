@@ -522,10 +522,24 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     const reqIdx = mockState.requests.findIndex((r) => r.request_id === requestId);
     if (reqIdx < 0) return { success: false, error: { code: 'REQUEST_NOT_FOUND', message: '요청을 찾을 수 없습니다.' } };
     const req = mockState.requests[reqIdx];
-    if (req.status !== 'REQUESTED') return { success: false, error: { code: 'STATE_CONFLICT', message: '이미 처리된 요청입니다.' } };
+    if (!['REQUESTED', 'COMPOSING', 'PROPOSED', 'APPROVED'].includes(req.status)) {
+      return { success: false, error: { code: 'STATE_CONFLICT', message: '작업 시작 전 요청만 거절할 수 있습니다.' } };
+    }
     mockState.requests[reqIdx] = { ...req, status: 'REJECTED', rejection_reason: reason, updated_at: now() };
     pushNotification(req.company_id, 'REQUEST_REJECTED', '요청 거절', `"${req.site_name}" 요청이 거절되었습니다. 사유: ${reason}`);
     return { success: true, data: mockState.requests[reqIdx] };
+  },
+  'POST /company/requests/{id}/cancel': async (_body, requestId?: string) => {
+    const request = mockState.requests.find((item) => item.request_id === requestId);
+    if (!request) return { success: false, error: { code: 'REQUEST_NOT_FOUND', message: '요청을 찾을 수 없습니다.' } };
+    if (['RUNNING', 'COMPLETED', 'CANCELLED', 'REJECTED'].includes(request.status)) {
+      return { success: false, error: { code: 'STATE_CONFLICT', message: '작업 시작 전 요청만 취소할 수 있습니다.' } };
+    }
+    request.status = 'CANCELLED';
+    request.updated_at = new Date().toISOString();
+    const crew = mockState.crews.find((item) => item.request_id === requestId && item.status !== 'CANCELLED');
+    if (crew) crew.status = 'CANCELLED';
+    return { success: true, data: request };
   },
 
   // office가 무응답 worker 제안 취소

@@ -5,6 +5,7 @@ Route:
   PUT  /company/requests/{requestId}              요청 수정
   GET  /company/requests                          내 요청 목록 (GSI2)
   GET  /company/requests/{requestId}              요청 상세 (+ 확정 작업조 + activeGap)
+  POST /company/requests/{requestId}/cancel       작업 시작 전 요청 취소
   POST /company/crews/{crewId}/checkin/{workerId}   출근 처리 (트랜잭션 4)
   POST /company/crews/{crewId}/checkout/{workerId}  퇴근 처리 (트랜잭션 5)
   POST /company/crews/{crewId}/gap-events            결원 등록 (트랜잭션 6)
@@ -21,6 +22,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from shared import db, txn
+from shared.cancellation import CancellationConflict, cancel_request_before_start
 from shared.auth import Principal
 from shared.crew import assemble_crew_members
 from shared.responses import ApiError, ErrorCode, success
@@ -159,6 +161,35 @@ def get_request(_event, principal: Principal, params):
     result["crew"] = _active_crew_view(req["request_id"])
     result["activeGap"] = _active_gap(req["request_id"])
     return success(result)
+
+
+@router.route("POST", "/company/requests/{requestId}/cancel")
+def cancel_request(event, principal: Principal, params):
+    principal.require_role(Role.COMPANY)
+    req = _load_own_request(principal, params["requestId"])
+    body = parse_body(event)
+    reason = body.get("reason") or "건설사 요청 취소"
+    try:
+        result = cancel_request_before_start(
+            req,
+            final_status=RequestStatus.CANCELLED,
+            reason_field="cancellation_reason",
+            reason=reason,
+        )
+    except CancellationConflict as exc:
+        raise ApiError(ErrorCode.STATE_CONFLICT, str(exc))
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("TransactionCanceledException", "ConditionalCheckFailedException"):
+            raise ApiError(ErrorCode.STATE_CONFLICT, "요청 상태가 변경되어 취소할 수 없습니다.")
+        raise
+
+    for worker in result.restored_workers:
+        _notify(worker.get("user_id"), "REQUEST_CANCELLED", "작업 요청 취소",
+                f"'{req.get('site_name', '현장')}' 작업 요청이 취소되었습니다.")
+    office = db.get_office(req["office_id"]) or {}
+    _notify(office.get("owner_user_id") or req["office_id"], "REQUEST_CANCELLED", "작업 요청 취소",
+            f"건설사가 '{req.get('site_name')}' 요청을 취소했습니다. 사유: {reason}")
+    return success(request_view(db.get_request(req["request_id"])))
 
 
 def _active_crew_view(request_id: str):

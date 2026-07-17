@@ -24,6 +24,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from shared import db, txn
+from shared.cancellation import CancellationConflict, cancel_request_before_start
 from shared.auth import Principal
 from shared.crew import (
     assemble_crew_members,
@@ -194,27 +195,35 @@ def reject_request(event, principal: Principal, params):
     if not req:
         raise ApiError(ErrorCode.REQUEST_NOT_FOUND, "요청을 찾을 수 없습니다.")
     principal.require_office(req["office_id"])
-    if req["status"] != RequestStatus.REQUESTED:
-        raise ApiError(ErrorCode.STATE_CONFLICT, "이미 처리된 요청입니다.")
+    if req["status"] not in (
+        RequestStatus.REQUESTED,
+        RequestStatus.COMPOSING,
+        RequestStatus.PROPOSED,
+        RequestStatus.APPROVED,
+    ):
+        raise ApiError(ErrorCode.STATE_CONFLICT, "작업 시작 전 요청만 거절할 수 있습니다.")
     body = parse_body(event)
     reason = body.get("reason") or ""
-    now = now_iso()
-    resp = db.update_request(
-        req["request_id"],
-        UpdateExpression="SET #s = :s, gsi1sk = :g, rejection_reason = :r, updated_at = :t",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={
-            ":s": RequestStatus.REJECTED,
-            ":g": db.request_gsi1sk(RequestStatus.REJECTED, req["request_id"]),
-            ":r": reason,
-            ":t": now,
-        },
-        ReturnValues="ALL_NEW",
-    )
+    try:
+        result = cancel_request_before_start(
+            req,
+            final_status=RequestStatus.REJECTED,
+            reason_field="rejection_reason",
+            reason=reason,
+        )
+    except CancellationConflict as exc:
+        raise ApiError(ErrorCode.STATE_CONFLICT, str(exc))
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("TransactionCanceledException", "ConditionalCheckFailedException"):
+            raise ApiError(ErrorCode.STATE_CONFLICT, "요청 상태가 변경되어 거절할 수 없습니다.")
+        raise
+    for worker in result.restored_workers:
+        _notify(worker.get("user_id"), "COMPOSITION_CANCELLED", "편성 종료",
+                f"{req.get('site_name', '현장')} 작업조 편성이 종료되었습니다.")
     company = db.get_company(req["company_id"]) or {}
     _notify(company.get("owner_user_id") or req["company_id"], "REQUEST_REJECTED", "요청 거절",
             f"'{req.get('site_name')}' 요청이 거절되었습니다. 사유: {reason}")
-    return success(request_view(resp["Attributes"]))
+    return success(request_view(db.get_request(req["request_id"])))
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +412,7 @@ def cancel_composition(_event, principal: Principal, params):
                 a["worker_id"], now=now, to_state=WorkerState.READY,
                 from_states=[WorkerState.NOTIFIED, WorkerState.RESERVED],
                 current_offer=None, current_crew_id=None,
+                dec_dispatched=worker.get("state") == WorkerState.RESERVED,
             ))
             entries.append(txn.assignment_update_entry(
                 crew_id, a["worker_id"], now=now,

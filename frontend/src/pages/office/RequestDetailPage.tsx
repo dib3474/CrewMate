@@ -63,10 +63,15 @@ export default function OfficeRequestDetailPage() {
 
   const handleReject = async () => {
     setRejecting(true);
-    await api.post(`/office/requests/${requestId}/reject`, { reason: rejectReason });
+    const res = await api.post(`/office/requests/${requestId}/reject`, { reason: rejectReason });
     setRejecting(false);
-    setShowRejectModal(false);
-    refetch();
+    if (res.success) {
+      setShowRejectModal(false);
+      toast.success('요청을 거절하고 진행 중인 편성을 종료했습니다.');
+      refetch();
+    } else {
+      toast.error(res.error.message);
+    }
   };
 
   const handleCancelOffer = async (workerId: string, workerName: string) => {
@@ -141,6 +146,7 @@ export default function OfficeRequestDetailPage() {
   const canCancelComposition = !!detail.crew
     && ['APPROVED', 'NOTIFIED', 'DISPATCHED'].includes(detail.crew.status)
     && detail.status !== 'RUNNING' && detail.status !== 'COMPLETED';
+  const canRejectRequest = ['REQUESTED', 'COMPOSING', 'PROPOSED', 'APPROVED'].includes(detail.status);
 
   const GAP_STEPS = ['DETECTED', 'RECOMPOSING', 'PROPOSED', 'APPROVED', 'FILLED'];
   const GAP_STEP_LABEL: Record<string, string> = {
@@ -180,10 +186,6 @@ export default function OfficeRequestDetailPage() {
                 className="bg-purple-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-purple-700 transition-colors">
                 수동 편성
               </button>
-              <button onClick={() => setShowRejectModal(true)}
-                className="bg-white border border-red-300 text-red-600 px-4 py-2 rounded-md text-sm font-medium hover:bg-red-50 transition-colors">
-                거절
-              </button>
             </>
           )}
           {isProposed && (
@@ -216,8 +218,21 @@ export default function OfficeRequestDetailPage() {
               {cancellingComposition ? '취소 중...' : '편성 취소'}
             </button>
           )}
+          {canRejectRequest && (
+            <button onClick={() => setShowRejectModal(true)} disabled={rejecting}
+              className="bg-white border border-red-300 text-red-600 px-4 py-2 rounded-md text-sm font-medium hover:bg-red-50 disabled:opacity-50 transition-colors">
+              요청 거절
+            </button>
+          )}
         </div>
       </div>
+
+      {detail.status === 'COMPOSING' && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4">
+          <div className="h-3 bg-indigo-200 rounded animate-pulse w-1/3 mb-2" />
+          <p className="text-sm text-indigo-700">AI가 후보와 편성 조건을 분석 중입니다. 다른 화면으로 이동해도 작업은 계속됩니다.</p>
+        </div>
+      )}
 
       {/* 긴급 재편성 진행 상태 바 */}
       {isEmergency && activeGap && (

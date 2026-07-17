@@ -570,6 +570,7 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref AssignmentsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref OfficesTable }
       Events:
         CreateRequest:
           Type: Api
@@ -583,6 +584,9 @@ Resources:
         GetRequest:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/requests/{requestId}", Method: get }
+        CancelRequest:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/requests/{requestId}/cancel", Method: post }
         Checkin:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/crews/{crewId}/checkin/{workerId}", Method: post }

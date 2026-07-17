@@ -15,7 +15,7 @@ const STATUS_STEPS: WorkRequestStatus[] = ['REQUESTED', 'APPROVED', 'DISPATCHED'
 const STATUS_LABEL: Record<string, string> = {
   REQUESTED: '요청됨', COMPOSING: '재편성 중', PROPOSED: '추천 완료',
   APPROVED: '수락 대기', DISPATCHED: '배차 완료', RUNNING: '작업 중',
-  COMPLETED: '완료', CANCELLED: '취소',
+  COMPLETED: '완료', CANCELLED: '취소', REJECTED: '거절됨',
 };
 
 const TRADE_LABEL: Record<string, string> = {
@@ -46,6 +46,7 @@ export default function RequestDetailPage() {
   const { requestId } = useParams<{ requestId: string }>();
   const navigate = useNavigate();
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [cancellingRequest, setCancellingRequest] = useState(false);
 
   const fetchDetail = useCallback(async () => {
     if (!requestId) return null;
@@ -96,10 +97,26 @@ export default function RequestDetailPage() {
     refetch();
   };
 
+  const handleCancelRequest = async () => {
+    if (!confirm('이 작업 요청을 취소하시겠습니까?\n작업 시작 전 편성과 배정이 모두 종료됩니다.')) return;
+    setCancellingRequest(true);
+    const res = await api.post<WorkRequest>(`/company/requests/${requestId}/cancel`, {
+      reason: '건설사 요청 취소',
+    });
+    setCancellingRequest(false);
+    if (res.success) {
+      toast.success('작업 요청이 취소되었습니다.');
+      refetch();
+    } else {
+      toast.error(res.error.message);
+    }
+  };
+
   if (!detail) return <p className="text-center text-gray-400 py-10">불러오는 중...</p>;
 
   const currentStepIdx = STATUS_STEPS.indexOf(detail.status);
   const showAttendance = detail.status === 'DISPATCHED' || detail.status === 'RUNNING';
+  const canCancelRequest = !['RUNNING', 'COMPLETED', 'CANCELLED', 'REJECTED'].includes(detail.status);
 
   return (
     <div className="max-w-2xl mx-auto space-y-5">
@@ -129,9 +146,17 @@ export default function RequestDetailPage() {
           </div>
         </div>
       )}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <h2 className="text-xl font-semibold text-gray-800">{detail.site_name}</h2>
-        <button onClick={() => navigate('/company')} className="text-sm text-gray-500 hover:text-gray-800">← 목록으로</button>
+        <div className="flex items-center gap-2">
+          {canCancelRequest && (
+            <button onClick={handleCancelRequest} disabled={cancellingRequest}
+              className="border border-red-300 text-red-600 px-3 py-1.5 rounded-md text-sm font-medium hover:bg-red-50 disabled:opacity-50">
+              {cancellingRequest ? '취소 중...' : '요청 취소'}
+            </button>
+          )}
+          <button onClick={() => navigate('/company')} className="text-sm text-gray-500 hover:text-gray-800">← 목록으로</button>
+        </div>
       </div>
 
       {/* 상태 진행 표시 */}

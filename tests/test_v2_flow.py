@@ -190,6 +190,65 @@ def test_decline_creates_gap_and_returns_ready(tables):
     assert "w2" in accept_by_id
 
 
+def test_office_can_reject_after_worker_decline_and_release_remaining_crew(tables):
+    _seed_worker(tables, "w1")
+    _seed_worker(tables, "w2")
+    _seed_request(tables, "REQ1", count=2)
+    manual = _call("functions.office_core.app", make_event(
+        "POST", "/office/crews/manual", role="OFFICE", office_id=OFFICE,
+        body={"request_id": "REQ1", "members": [
+            {"worker_id": "w1", "assigned_trade": "GENERAL", "offered_wage": 150000},
+            {"worker_id": "w2", "assigned_trade": "GENERAL", "offered_wage": 150000},
+        ]}))
+    crew_id = body_of(manual)["data"]["crew_id"]
+    _call("functions.assignment.app", make_event(
+        "POST", f"/office/crews/{crew_id}/approve", role="OFFICE", office_id=OFFICE,
+        path_params={"crewId": crew_id}))
+    _call("functions.worker_api.app", make_event(
+        "POST", "/worker/offer/decline", role="WORKER", sub="w1"))
+
+    rejected = _call("functions.office_core.app", make_event(
+        "POST", "/office/requests/REQ1/reject", role="OFFICE", office_id=OFFICE,
+        body={"reason": "대체 인력 부족"}, path_params={"requestId": "REQ1"}))
+
+    assert rejected["statusCode"] == 200
+    assert tables.get_request("REQ1")["status"] == "REJECTED"
+    assert tables.get_crew(crew_id)["status"] == "CANCELLED"
+    assert tables.get_worker("w2")["state"] == "READY"
+    assert tables.get_worker("w2").get("current_crew_id") is None
+
+
+def test_company_can_cancel_dispatched_request_and_restore_workers(tables):
+    _seed_worker(tables, "w1")
+    _seed_worker(tables, "w2")
+    _seed_request(tables, "REQ1", count=2)
+    manual = _call("functions.office_core.app", make_event(
+        "POST", "/office/crews/manual", role="OFFICE", office_id=OFFICE,
+        body={"request_id": "REQ1", "members": [
+            {"worker_id": "w1", "assigned_trade": "GENERAL", "offered_wage": 150000},
+            {"worker_id": "w2", "assigned_trade": "GENERAL", "offered_wage": 150000},
+        ]}))
+    crew_id = body_of(manual)["data"]["crew_id"]
+    _call("functions.assignment.app", make_event(
+        "POST", f"/office/crews/{crew_id}/approve", role="OFFICE", office_id=OFFICE,
+        path_params={"crewId": crew_id}))
+    for worker_id in ("w1", "w2"):
+        _call("functions.worker_api.app", make_event(
+            "POST", "/worker/offer/accept", role="WORKER", sub=worker_id))
+
+    cancelled = _call("functions.company_request.app", make_event(
+        "POST", "/company/requests/REQ1/cancel", role="COMPANY", company_id=COMPANY,
+        body={"reason": "현장 일정 취소"}, path_params={"requestId": "REQ1"}))
+
+    assert cancelled["statusCode"] == 200
+    assert tables.get_request("REQ1")["status"] == "CANCELLED"
+    assert tables.get_crew(crew_id)["status"] == "CANCELLED"
+    for worker_id in ("w1", "w2"):
+        worker = tables.get_worker(worker_id)
+        assert worker["state"] == "READY"
+        assert worker["dispatched_count"] == 0
+
+
 def test_concurrency_double_approve_conflict(tables):
     _seed_worker(tables, "w1")
     _seed_request(tables, "REQ1", count=1)
