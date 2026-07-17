@@ -33,17 +33,23 @@ export default function AttendanceHeatmap({ attendance }: { attendance: Attendan
 
   return (
     <div>
-      <div className="flex gap-1 overflow-x-auto pb-1">
+      <div className="grid grid-flow-col grid-rows-7 gap-1 w-full pb-1">
         {weeks.map((week, wi) => (
-          <div key={wi} className="flex flex-col gap-1">
+          <div key={wi} className="contents">
             {week.map((cell) => (
               <div
                 key={cell.key}
-                title={cell.future ? undefined : `${cell.key} · ${cell.count ? '근무 기록 있음' : '근무 기록 없음'}`}
                 aria-hidden={cell.future}
                 aria-label={cell.future ? undefined : `${cell.key} ${cell.count ? '근무함' : '근무하지 않음'}`}
-                className={`w-3 h-3 rounded-sm ${cell.future ? 'bg-transparent' : cell.count ? 'bg-green-600' : 'bg-gray-100'}`}
-              />
+                tabIndex={cell.count ? 0 : undefined}
+                className={`relative group w-full aspect-square rounded-sm ${cell.future ? 'bg-transparent' : cell.count ? 'bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-400' : 'bg-gray-100'}`}
+              >
+                {cell.count > 0 && (
+                  <span className="pointer-events-none absolute z-20 hidden group-hover:block group-focus:block bottom-full left-1/2 -translate-x-1/2 mb-1 whitespace-nowrap rounded bg-gray-900 px-2 py-1 text-[10px] text-white shadow-lg">
+                    {cell.key} · 근무함
+                  </span>
+                )}
+              </div>
             ))}
           </div>
         ))}
@@ -57,16 +63,6 @@ export default function AttendanceHeatmap({ attendance }: { attendance: Attendan
           근무함
         </span>
       </div>
-      {Object.keys(attendance).some((key) => attendance[key] > 0) && (
-        <p className="mt-2 text-[11px] text-gray-500">
-          최근 근무일: {Object.keys(attendance)
-            .filter((key) => attendance[key] > 0)
-            .sort()
-            .reverse()
-            .slice(0, 5)
-            .join(', ')}
-        </p>
-      )}
     </div>
   );
 }

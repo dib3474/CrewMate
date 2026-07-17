@@ -133,7 +133,7 @@ export default function WorkerHomePage() {
             스펙 보고서 보기
           </button>
           <button onClick={() => navigate('/worker/application')}
-            className="text-sm text-gray-500 hover:text-gray-800 transition-colors">
+            className="text-sm font-medium text-green-700 border border-green-200 bg-green-50 px-3 py-1.5 rounded-md hover:bg-green-100 transition-colors">
             지원서 수정
           </button>
         </div>
