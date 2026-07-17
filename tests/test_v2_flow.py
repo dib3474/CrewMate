@@ -91,6 +91,9 @@ def test_worker_application_and_ready(tables):
 
 
 def test_full_cycle_manual_approve_accept_checkin_checkout(tables):
+    from shared.schemas import build_company
+
+    tables.put_company(build_company(company_id=COMPANY, name="해운대건설"))
     _seed_worker(tables, "w1")
     _seed_worker(tables, "w2")
     _seed_request(tables, "REQ1", count=2)
@@ -144,16 +147,21 @@ def test_full_cycle_manual_approve_accept_checkin_checkout(tables):
     for w in ("w1", "w2"):
         _call("functions.company_request.app", make_event(
             "POST", f"/company/crews/{crew_id}/checkout/{w}", role="COMPANY", company_id=COMPANY,
-            path_params={"crewId": crew_id, "workerId": w}))
+            path_params={"crewId": crew_id, "workerId": w}, body={"rating": 5}))
     assert tables.get_request("REQ1")["status"] == "COMPLETED"
     w1 = tables.get_worker("w1")
     assert w1["state"] == "INACTIVE"
     assert w1["completed_count"] == 1
+    assert int(w1.get("rating_count", 0)) == 0
 
     # 이력 조회
     hist = _call("functions.worker_api.app", make_event("GET", "/worker/history", role="WORKER", sub="w1"))
     entries = body_of(hist)["data"]
     assert len(entries) == 1 and entries[0]["assigned_trade"] == "GENERAL"
+    assert entries[0]["company_name"] == "해운대건설"
+    assert entries[0]["start_time"] == "07:00"
+    assert entries[0]["location_text"] == "부산"
+    assert entries[0]["required_workers"] == [{"trade": "GENERAL", "count": 2}]
 
 
 def test_decline_creates_gap_and_returns_ready(tables):
@@ -344,6 +352,21 @@ def test_agent_compose_produces_recommendations(tables):
     assert all(m["assigned_trade"] == "GENERAL" for m in rec["members"])
     assert rec["total_cost"] == sum(m["offered_wage"] for m in rec["members"])
     assert tables.get_request("REQ1")["status"] == "PROPOSED"
+
+
+def test_general_slot_accepts_worker_without_general_preference(tables):
+    _seed_worker(tables, "form-worker", trade="FORMWORK")
+    _seed_request(tables, "REQ-GENERAL", trade="GENERAL", count=1, budget=200000)
+
+    response = _call("functions.agent_invoke.app", make_event(
+        "POST", "/office/requests/REQ-GENERAL/agent-compose",
+        role="OFFICE", office_id=OFFICE,
+        path_params={"requestId": "REQ-GENERAL"},
+    ))
+
+    recommendation = body_of(response)["data"]["recommendations"][0]
+    assert recommendation["members"][0]["worker_id"] == "form-worker"
+    assert recommendation["members"][0]["assigned_trade"] == "GENERAL"
 
 
 def test_agent_compose_can_start_asynchronously_without_forwarding_token(tables, monkeypatch):

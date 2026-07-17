@@ -398,10 +398,10 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     return { success: true, data: mockState.workers[wIdx] };
   },
 
-  // 퇴근 처리 (company가 호출, body.rating: 1~5 별점 선택)
+  // 퇴근 처리
   'POST /company/crews/{crewId}/checkout/{workerId}': async (_body) => {
     await delay(200);
-    const { worker_id, rating } = (_body || {}) as { worker_id: string; rating?: number };
+    const { worker_id } = (_body || {}) as { worker_id: string };
     const wIdx = mockState.workers.findIndex((w) => w.worker_id === worker_id);
     if (wIdx < 0) return { success: false, error: { code: 'WORKER_NOT_FOUND', message: '근로자를 찾을 수 없습니다.' } };
     const worker = mockState.workers[wIdx];
@@ -415,19 +415,18 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
       request_id: reqForHistory.request_id,
       site_name: reqForHistory.site_name,
       work_date: reqForHistory.work_date,
+      start_time: reqForHistory.start_time,
+      location_text: reqForHistory.location_text,
+      company_name: Object.values(SEED_ACCOUNTS).find(
+        (account) => account.user.userId === reqForHistory.company_id,
+      )?.user.name,
+      required_workers: reqForHistory.required_workers,
+      notes: reqForHistory.notes,
       assigned_trade: memberForHistory.assigned_trade,
       offered_wage: memberForHistory.offered_wage,
       completed_at: now(),
     } : null;
-    // 별점(1~5) 반영: 평균/개수 갱신
-    let ratingCount = worker.rating_count || 0;
-    let ratingAvg = worker.rating ?? null;
-    if (typeof rating === 'number' && rating >= 1 && rating <= 5) {
-      const newCount = ratingCount + 1;
-      ratingAvg = Math.round(((ratingAvg ?? 0) * ratingCount + rating) / newCount * 10) / 10;
-      ratingCount = newCount;
-    }
-    mockState.workers[wIdx] = { ...worker, state: 'INACTIVE', current_crew_id: null, current_offer: null, completed_count: worker.completed_count + 1, rating: ratingAvg, rating_count: ratingCount, work_history: historyEntry ? [...worker.work_history, historyEntry] : worker.work_history, state_changed_at: now(), updated_at: now() };
+    mockState.workers[wIdx] = { ...worker, state: 'INACTIVE', current_crew_id: null, current_offer: null, completed_count: worker.completed_count + 1, work_history: historyEntry ? [...worker.work_history, historyEntry] : worker.work_history, state_changed_at: now(), updated_at: now() };
     // 전원 퇴근(INACTIVE) 시 crew→COMPLETED, request→COMPLETED
     const crew = mockState.crews.find((c) => c.crew_id === crewIdBeforeCheckout);
     if (crew) {

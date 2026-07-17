@@ -82,6 +82,9 @@ def _completed_history(worker_id: str) -> list[dict[str, Any]]:
         if a.get("status") == AssignmentStatus.COMPLETED:
             crew = db.get_crew(a["crew_id"])
             req = db.get_request(crew["request_id"]) if crew else None
+            if req:
+                company = db.get_company(req.get("company_id"))
+                req = {**req, "company_name": (company or {}).get("name")}
             history.append(work_history_entry(a, req))
     return history
 

@@ -13,7 +13,7 @@ const GAP_STEP_LABEL: Record<string, string> = {
 const STATUS_STEPS: WorkRequestStatus[] = ['REQUESTED', 'APPROVED', 'DISPATCHED', 'RUNNING', 'COMPLETED'];
 
 const STATUS_LABEL: Record<string, string> = {
-  REQUESTED: '요청됨', COMPOSING: '재편성 중', PROPOSED: '추천 완료',
+  REQUESTED: '요청됨', COMPOSING: 'AI 편성 중', PROPOSED: '추천 완료',
   APPROVED: '수락 대기', DISPATCHED: '배차 완료', RUNNING: '작업 중',
   COMPLETED: '완료', CANCELLED: '취소', REJECTED: '거절됨',
 };
@@ -66,23 +66,12 @@ export default function RequestDetailPage() {
     refetch();
   };
 
-  // 퇴근 처리 시 별점(1~5) 평가 모달
-  const [checkoutTarget, setCheckoutTarget] = useState<{ workerId: string; workerName: string } | null>(null);
-  const [stars, setStars] = useState(5);
-
-  const handleCheckout = (workerId: string, workerName: string) => {
-    setStars(5);
-    setCheckoutTarget({ workerId, workerName });
-  };
-
-  const submitCheckout = async () => {
-    if (!checkoutTarget) return;
-    const { workerId } = checkoutTarget;
+  const handleCheckout = async (workerId: string, workerName: string) => {
+    if (!confirm(`${workerName}님을 퇴근 처리하시겠습니까?`)) return;
     setActionLoading(workerId + '_out');
-    const res = await api.post(`/company/crews/${detail?.crew?.crew_id}/checkout/${workerId}`, { worker_id: workerId, rating: stars });
+    const res = await api.post(`/company/crews/${detail?.crew?.crew_id}/checkout/${workerId}`, { worker_id: workerId });
     setActionLoading(null);
-    setCheckoutTarget(null);
-    if (res.success) toast.success('퇴근 처리 완료. 평점이 반영되었습니다.');
+    if (res.success) toast.success('퇴근 처리가 완료되었습니다.');
     else toast.error(res.error.message);
     refetch();
   };
@@ -120,32 +109,6 @@ export default function RequestDetailPage() {
 
   return (
     <div className="max-w-2xl mx-auto space-y-5">
-      {/* 퇴근 별점 평가 모달 */}
-      {checkoutTarget && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setCheckoutTarget(null)}>
-          <div className="bg-white rounded-lg p-6 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-800 mb-1">{checkoutTarget.workerName}님 퇴근 처리</h3>
-            <p className="text-sm text-gray-500 mb-4">오늘 작업에 대한 평점을 남겨주세요. (퇴근 후 되돌릴 수 없습니다)</p>
-            <div className="flex justify-center gap-1 mb-5">
-              {[1, 2, 3, 4, 5].map((s) => (
-                <button key={s} type="button" onClick={() => setStars(s)}
-                  className={`text-3xl transition-transform hover:scale-110 ${s <= stars ? 'text-yellow-400' : 'text-gray-300'}`}
-                  aria-label={`${s}점`}>★</button>
-              ))}
-            </div>
-            <p className="text-center text-sm text-gray-600 mb-4">{stars}점</p>
-            <div className="flex gap-2">
-              <button type="button" onClick={submitCheckout}
-                disabled={actionLoading === checkoutTarget.workerId + '_out'}
-                className="flex-1 bg-orange-600 text-white py-2.5 rounded-md text-sm font-medium hover:bg-orange-700 disabled:opacity-50">
-                {actionLoading === checkoutTarget.workerId + '_out' ? '처리 중...' : '퇴근 처리 + 평점 저장'}
-              </button>
-              <button type="button" onClick={() => setCheckoutTarget(null)}
-                className="px-4 py-2.5 border border-gray-300 text-gray-700 rounded-md text-sm hover:bg-gray-50">취소</button>
-            </div>
-          </div>
-        </div>
-      )}
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-xl font-semibold text-gray-800">{detail.site_name}</h2>
         <div className="flex items-center gap-2">

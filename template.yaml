@@ -521,6 +521,7 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref RequestsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CompaniesTable }
       Events:
         CreateApplication:
           Type: Api

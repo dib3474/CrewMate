@@ -132,6 +132,11 @@ export interface WorkHistoryEntry {
   request_id: string;
   site_name: string;
   work_date: string;
+  start_time?: string;
+  location_text?: string;
+  company_name?: string;
+  required_workers?: RequiredWorker[];
+  notes?: string;
   assigned_trade: Trade;
   offered_wage: number;
   completed_at: string;
