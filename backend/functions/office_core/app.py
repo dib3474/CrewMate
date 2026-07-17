@@ -2,6 +2,7 @@
 
 Route:
   GET  /office/workers                          소속 근로자 조회 (필터)
+  GET  /office/workers/{workerId}               소속 근로자 지원서 상세
   GET  /office/requests                         요청 목록 (GSI1, 토큰 office_id 기준)
   GET  /office/requests/{requestId}             요청 상세 (+작업조)
   POST /office/requests/{requestId}/reject      요청 거절 (+COMPANY 알림)
@@ -85,6 +86,33 @@ def list_workers(event, principal: Principal, _params):
         workers = db.query_office_all_workers(principal.office_id)
     workers = _apply_filters(workers, qp)
     return success([worker_office_view(w) for w in workers])
+
+
+@router.route("GET", "/office/workers/{workerId}")
+def get_worker_detail(_event, principal: Principal, params):
+    """지원서 원문과 완료 작업 이력을 소속 사무소에만 제공한다."""
+    principal.require_role(Role.OFFICE)
+    worker = db.get_worker(params["workerId"])
+    if not worker:
+        raise ApiError(ErrorCode.WORKER_NOT_FOUND, "근로자를 찾을 수 없습니다.")
+    principal.require_office(worker["office_id"])
+
+    history = []
+    for assignment in db.query_worker_assignments(worker["worker_id"], limit=200):
+        if assignment.get("status") != AssignmentStatus.COMPLETED:
+            continue
+        crew = db.get_crew(assignment["crew_id"])
+        request = db.get_request(crew["request_id"]) if crew else None
+        history.append({
+            "crew_id": assignment.get("crew_id"),
+            "request_id": (request or {}).get("request_id"),
+            "site_name": (request or {}).get("site_name"),
+            "work_date": (request or {}).get("work_date"),
+            "assigned_trade": assignment.get("assigned_trade"),
+            "offered_wage": assignment.get("offered_wage"),
+            "completed_at": assignment.get("updated_at") or assignment.get("created_at"),
+        })
+    return success(worker_office_view(worker, work_history=history))
 
 
 def _apply_filters(workers, qp):

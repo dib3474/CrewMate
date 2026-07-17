@@ -70,16 +70,21 @@ def test_worker_application_and_ready(tables):
         "preferred_trades": ["GENERAL"], "excluded_trades": ["REBAR"],
         "career_years": 4, "age": 33, "region": "부산 해운대구",
         "desired_daily_wage": 160000,
+        "certifications": ["철근기능사"],
+        "abilities": ["철근가공 조립검사"],
+        "introduction": "철근 현장 경험이 있습니다.",
     })
     resp = _call("functions.worker_api.app", ev)
     assert resp["statusCode"] == 201
     data = body_of(resp)["data"]
     assert data["state"] == "INACTIVE"
-    # 본인 응답: 완료 작업 수(completed_count)는 노출, 성실도 분모(dispatched_count)는 제외
+    # 본인 응답: 작업 실적과 지원서 원문을 노출한다.
     assert data["completed_count"] == 0
-    assert "dispatched_count" not in data
+    assert data["dispatched_count"] == 0
     assert "no_show_count" not in data
     assert data["preferred_trades"] == ["GENERAL"]
+    assert data["abilities"] == ["철근가공 조립검사"]
+    assert data["introduction"] == "철근 현장 경험이 있습니다."
 
     ready = _call("functions.worker_api.app", make_event("POST", "/worker/state/ready", role="WORKER", sub="w1"))
     assert body_of(ready)["data"]["state"] == "READY"
@@ -118,6 +123,15 @@ def test_full_cycle_manual_approve_accept_checkin_checkout(tables):
     # 전원 수락 → DISPATCHED
     assert tables.get_request("REQ1")["status"] == "DISPATCHED"
     assert tables.get_worker("w1")["dispatched_count"] == 1
+
+    assignment_detail = _call(
+        "functions.worker_api.app",
+        make_event("GET", "/worker/assignments", role="WORKER", sub="w1"),
+    )
+    current_job = body_of(assignment_detail)["data"][0]
+    assert current_job["assigned_trade"] == "GENERAL"
+    assert current_job["offered_wage"] == 150000
+    assert current_job["required_workers"] == [{"trade": "GENERAL", "count": 2}]
 
     # 출근 (트랜잭션 4)
     for w in ("w1", "w2"):
@@ -208,6 +222,33 @@ def test_integrity_exposure_office_vs_company(tables):
     assert worker["completed_count"] == 10 and worker["dispatched_count"] == 11
     # 부정 라벨 필드 부재
     assert "no_show_count" not in worker
+
+
+def test_office_can_open_own_worker_application_detail_only(tables):
+    from shared.schemas import build_worker
+
+    worker = build_worker(
+        user_id="w1", worker_id="w1", name="근로자", phone="010-1111-2222",
+        office_id=OFFICE, preferred_trades=["GENERAL"], excluded_trades=[],
+        career_years=3, age=29, region="부산", desired_daily_wage=150000,
+        certifications=["철근기능사"], abilities=["시공 전 준비"], introduction="성실하게 일합니다.",
+    )
+    tables.put_worker(worker)
+
+    own = _call("functions.office_core.app", make_event(
+        "GET", "/office/workers/w1", role="OFFICE", office_id=OFFICE,
+        path_params={"workerId": "w1"},
+    ))
+    detail = body_of(own)["data"]
+    assert detail["phone"] == "010-1111-2222"
+    assert detail["abilities"] == ["시공 전 준비"]
+    assert detail["introduction"] == "성실하게 일합니다."
+
+    other = _call("functions.office_core.app", make_event(
+        "GET", "/office/workers/w1", role="OFFICE", office_id="OFFICE999",
+        path_params={"workerId": "w1"},
+    ))
+    assert other["statusCode"] == 403
 
 
 def test_company_response_hides_integrity(tables):

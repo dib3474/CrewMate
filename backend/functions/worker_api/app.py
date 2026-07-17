@@ -63,6 +63,8 @@ _EDITABLE_FIELDS = (
     "region",
     "desired_daily_wage",
     "certifications",
+    "abilities",
+    "introduction",
 )
 
 
@@ -98,6 +100,12 @@ def create_application(event, principal: Principal, _params):
     )
     preferred = validate_trades(body.get("preferred_trades"), "preferred_trades")
     excluded = validate_trades(body.get("excluded_trades"), "excluded_trades")
+    for list_field in ("certifications", "abilities"):
+        value = body.get(list_field) or []
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ApiError(ErrorCode.VALIDATION_ERROR, f"{list_field}는 문자열 배열이어야 합니다.")
+    if body.get("introduction") is not None and not isinstance(body["introduction"], str):
+        raise ApiError(ErrorCode.VALIDATION_ERROR, "introduction은 문자열이어야 합니다.")
 
     if db.get_worker(principal.user_id):
         raise ApiError(ErrorCode.VALIDATION_ERROR, "이미 지원서가 존재합니다. 수정(PUT)을 이용하세요.")
@@ -115,6 +123,8 @@ def create_application(event, principal: Principal, _params):
         region=body["region"],
         desired_daily_wage=int(body["desired_daily_wage"]),
         certifications=body.get("certifications") or [],
+        abilities=body.get("abilities") or [],
+        introduction=body.get("introduction") or "",
         state=WorkerState.INACTIVE,
     )
     try:
@@ -143,6 +153,14 @@ def update_application(event, principal: Principal, _params):
         updates["preferred_trades"] = validate_trades(updates["preferred_trades"], "preferred_trades")
     if "excluded_trades" in updates:
         updates["excluded_trades"] = validate_trades(updates["excluded_trades"], "excluded_trades")
+    for list_field in ("certifications", "abilities"):
+        if list_field in updates and (
+            not isinstance(updates[list_field], list)
+            or any(not isinstance(item, str) for item in updates[list_field])
+        ):
+            raise ApiError(ErrorCode.VALIDATION_ERROR, f"{list_field}는 문자열 배열이어야 합니다.")
+    if "introduction" in updates and not isinstance(updates["introduction"], str):
+        raise ApiError(ErrorCode.VALIDATION_ERROR, "introduction은 문자열이어야 합니다.")
     for int_field in ("career_years", "age", "desired_daily_wage"):
         if int_field in updates:
             updates[int_field] = int(updates[int_field])
@@ -421,6 +439,7 @@ def get_assignments(_event, principal: Principal, _params):
     request = db.get_request(crew["request_id"])
     if not request:
         return success([])
+    assignment = db.get_assignment(crew_id, worker["worker_id"]) or {}
     return success([
         {
             "crew_id": crew["crew_id"],
@@ -430,6 +449,13 @@ def get_assignments(_event, principal: Principal, _params):
             "start_time": request.get("start_time"),
             "location_text": request.get("location_text"),
             "status": crew.get("status"),
+            "assigned_trade": assignment.get("assigned_trade"),
+            "offered_wage": clean(assignment.get("offered_wage")),
+            "acceptance": assignment.get("acceptance"),
+            "is_replacement": bool(assignment.get("is_replacement")),
+            "eta": assignment.get("eta"),
+            "required_workers": clean(request.get("required_workers") or []),
+            "notes": request.get("notes") or "",
         }
     ])
 

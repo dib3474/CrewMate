@@ -535,9 +535,21 @@ Resources:
         OfferDecline:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/offer/decline, Method: post }
+        CancelReservation:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/reservation/cancel, Method: post }
         GetAssignments:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/assignments, Method: get }
+        GetAcceptedJobs:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/accepted-jobs, Method: get }
+        GetAttendance:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/attendance, Method: get }
+        GetWageStats:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/worker/wage-stats/{careerYears}", Method: get }
         GetHistory:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/history, Method: get }
@@ -601,6 +613,9 @@ Resources:
         ListWorkers:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /office/workers, Method: get }
+        GetWorkerDetail:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/workers/{workerId}", Method: get }
         ListRequests:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /office/requests, Method: get }
