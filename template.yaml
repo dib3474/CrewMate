@@ -24,27 +24,38 @@ Parameters:
   # --- Crew Composition Agent 설정 (비밀 아님) ---
   CrewAgentModelId:
     Type: String
-    Default: apac.anthropic.claude-sonnet-4-6
+    Default: global.anthropic.claude-sonnet-4-6
     Description: Amazon Bedrock 모델(추론 프로파일) ID.
+  CrewAgentFoundationModelId:
+    Type: String
+    Default: anthropic.claude-sonnet-4-6
+    Description: Crew Agent 추론 프로파일의 기반 모델 ID. InvokeModel IAM 범위에 사용.
   CrewAgentRegion:
     Type: String
     Default: ap-northeast-2
     Description: Bedrock 호출 리전 (CREW_AGENT_REGION).
+  CrewAgentTemperature:
+    Type: String
+    Default: "0.2"
   AgentFallbackEnabled:
     Type: String
-    Default: "false"
+    Default: "true"
     AllowedValues: ["true", "false"]
-    Description: Bedrock 실패 시 사전 준비된 데모 추천으로 폴백할지 여부.
+    Description: Bedrock 호출·검증 실패 시 결정론적 규칙 기반 추천으로 폴백할지 여부.
   AgentInvokeTimeoutSeconds:
     Type: String
-    Default: "25"
+    Default: "45"
     Description: 단일 Bedrock compose 호출의 벽시계 상한(초).
 
   # --- Applicant Spec Gap Report Agent 설정 ---
   ReportModelId:
     Type: String
-    Default: apac.anthropic.claude-sonnet-4-6
+    Default: global.anthropic.claude-sonnet-4-6
     Description: 보고서 작성용 Bedrock 모델 또는 inference profile ID.
+  ReportFoundationModelId:
+    Type: String
+    Default: anthropic.claude-sonnet-4-6
+    Description: Foundation model behind ReportModelId; used to scope InvokeModel IAM access.
   ReportModelRegion:
     Type: String
     Default: ap-northeast-2
@@ -58,13 +69,17 @@ Parameters:
     Type: String
     Default: ""
     Description: 별도로 생성·동기화한 Amazon Bedrock Knowledge Base ID. 빈 값이면 KB 미구성으로 명시한다.
+  KnowledgeBaseRegion:
+    Type: String
+    Default: ap-northeast-2
+    Description: 외부 Amazon Bedrock Knowledge Base 리전.
   KbNumberOfResults:
     Type: String
     Default: "5"
   KbReviewStatus:
     Type: String
-    Default: 검토완료
-    Description: Retrieve metadata filter. 현재 Archive의 검토 전 문서는 이 값과 일치하지 않는다.
+    Default: 구조화원본
+    Description: Retrieve metadata filter. 검토되지 않은 자동 추천 문서와 구조화 원본을 분리한다.
   QnetCacheTtlSeconds:
     Type: String
     Default: "604800"
@@ -277,6 +292,22 @@ Resources:
           - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
       VersioningConfiguration: { Status: Enabled }
 
+  KnowledgeSourceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref KnowledgeSourceBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt KnowledgeSourceBucket.Arn
+              - !Sub "${KnowledgeSourceBucket.Arn}/*"
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
   ReportOutputBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -299,6 +330,22 @@ Resources:
             Status: Enabled
             Prefix: reports/
             ExpirationInDays: !Ref ReportRetentionDays
+
+  ReportOutputBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReportOutputBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ReportOutputBucket.Arn
+              - !Sub "${ReportOutputBucket.Arn}/*"
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
 
   QualificationEvidenceCache:
     Type: AWS::DynamoDB::Table
@@ -327,6 +374,16 @@ Resources:
         AttributeName: expires_at
         Enabled: true
       SSESpecification: { SSEEnabled: true }
+
+  AgentDepsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "crewmate-agent-deps-${Stage}"
+      ContentUri: layers/agent_deps/
+      CompatibleRuntimes: [python3.12]
+      RetentionPolicy: Retain
+    Metadata:
+      BuildMethod: python3.12
 
   ReportDepsLayer:
     Type: AWS::Serverless::LayerVersion
@@ -616,8 +673,7 @@ Resources:
           Properties: { RestApiId: !Ref CrewMateApi, Path: /notifications/read, Method: post }
 
   # =========================================================================
-  # Crew Composition Agent 스택 (NORMAL agent-compose / EMERGENCY agent-recompose)
-  #   Bedrock 를 boto3(런타임 내장)로 직접 호출한다. 네이티브 의존성/레이어/Docker 불필요.
+  # Crew Composition Strands Agent (NORMAL agent-compose / EMERGENCY agent-recompose)
   # =========================================================================
   AgentInvokeFunction:
     Type: AWS::Serverless::Function
@@ -627,10 +683,13 @@ Resources:
       Handler: functions.agent_invoke.app.lambda_handler
       Timeout: 60
       MemorySize: 512
+      Layers:
+        - !Ref AgentDepsLayer
       Environment:
         Variables:
           CREW_AGENT_MODEL_ID: !Ref CrewAgentModelId
           CREW_AGENT_REGION: !Ref CrewAgentRegion
+          CREW_AGENT_TEMPERATURE: !Ref CrewAgentTemperature
           AGENT_FALLBACK_ENABLED: !Ref AgentFallbackEnabled
           AGENT_INVOKE_TIMEOUT_S: !Ref AgentInvokeTimeoutSeconds
       Policies:
@@ -646,8 +705,8 @@ Resources:
                 - bedrock:InvokeModel
                 - bedrock:InvokeModelWithResponseStream
               Resource:
-                - "arn:aws:bedrock:*::foundation-model/*"
-                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+                - !Sub "arn:aws:bedrock:*::foundation-model/${CrewAgentFoundationModelId}"
+                - !Sub "arn:aws:bedrock:${CrewAgentRegion}:${AWS::AccountId}:inference-profile/${CrewAgentModelId}"
       Events:
         AgentCompose:
           Type: Api
@@ -677,6 +736,7 @@ Resources:
           REPORT_MODEL_TEMPERATURE: !Ref ReportModelTemperature
           REPORT_AGENT_TIMEOUT_SECONDS: !Ref ReportAgentTimeoutSeconds
           KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+          KNOWLEDGE_BASE_REGION: !Ref KnowledgeBaseRegion
           KB_NUMBER_OF_RESULTS: !Ref KbNumberOfResults
           KB_REVIEW_STATUS: !Ref KbReviewStatus
           KNOWLEDGE_SOURCE_BUCKET: !Ref KnowledgeSourceBucket
@@ -690,9 +750,15 @@ Resources:
           QNET_MAX_RETRIES: "1"
           QNET_MIN_INTERVAL_SECONDS: "0.5"
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref QualificationEvidenceCache }
-        - DynamoDBCrudPolicy: { TableName: !Ref SpecReportJobs }
         - Statement:
+            - Sid: QualificationEvidenceCacheAccess
+              Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt QualificationEvidenceCache.Arn
+            - Sid: SpecReportJobMetadataWrite
+              Effect: Allow
+              Action: [dynamodb:PutItem]
+              Resource: !GetAtt SpecReportJobs.Arn
             - Sid: ReadAuthoritativeRules
               Effect: Allow
               Action: [s3:GetObject]
@@ -710,14 +776,14 @@ Resources:
               Action: [bedrock:Retrieve]
               Resource: !If
                 - HasKnowledgeBase
-                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
-                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/UNCONFIGURED"
+                - !Sub "arn:aws:bedrock:${KnowledgeBaseRegion}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+                - !Sub "arn:aws:bedrock:${KnowledgeBaseRegion}:${AWS::AccountId}:knowledge-base/UNCONFIGURED"
             - Sid: InvokeReportModel
               Effect: Allow
               Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
               Resource:
-                - "arn:aws:bedrock:*::foundation-model/*"
-                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+                - !Sub "arn:aws:bedrock:*::foundation-model/${ReportFoundationModelId}"
+                - !Sub "arn:aws:bedrock:${ReportModelRegion}:${AWS::AccountId}:inference-profile/${ReportModelId}"
       Events:
         GenerateSpecReport:
           Type: Api
@@ -765,3 +831,8 @@ Outputs:
     Value: !GetAtt ReportKmsKey.Arn
   SpecReportApiPath:
     Value: !Sub "https://${CrewMateApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/reports/spec-gap"
+  SpecReportFunctionName:
+    Value: !Ref SpecReportAgentFunction
+  ExternalKnowledgeBaseId:
+    Condition: HasKnowledgeBase
+    Value: !Ref KnowledgeBaseId
