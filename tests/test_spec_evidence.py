@@ -6,13 +6,27 @@ from pathlib import Path
 
 import pytest
 
-from ncs_collector.models import QualificationEvidence
+from ncs_collector.models import (
+    Evidence,
+    EvidenceType,
+    QualificationEvidence,
+    RequirementEvidenceResult,
+)
 from spec_report.qnet import (
     DynamoQualificationCache,
+    QNetHttpAdapter,
     QNetQualificationService,
     validate_qnet_url,
 )
-from spec_report.report_agent import REPORT_TOOL_NAMES
+from spec_report.report_agent import (
+    REPORT_TOOL_NAMES,
+    PlanBoundQNetService,
+    PlanBoundRetriever,
+    _compact_kb_result,
+    _compact_qnet_result,
+    _extract_json_payload,
+    build_agent,
+)
 from spec_report.retrieval import BedrockKnowledgeBaseRetriever, LocalKeywordRetriever
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,7 +71,7 @@ def test_11_kb_request_contains_reviewed_filter():
     client = FakeKbClient()
     retriever = BedrockKnowledgeBaseRetriever("KB1", client=client)
     retriever.retrieve_requirement_evidence("방수시공", "방수")
-    assert {"equals": {"key": "review_status", "value": "검토완료"}} in _clauses(client)
+    assert {"equals": {"key": "review_status", "value": "구조화원본"}} in _clauses(client)
 
 
 def test_12_kb_result_preserves_document_and_location():
@@ -104,6 +118,7 @@ def test_15_qnet_cache_hit_avoids_web():
         "source_url": QNET_URL,
         "checked_at": "2026-01-01T00:00:00+00:00",
         "fetch_status": "SUCCESS",
+        "schema_version": 3,
         "expires_at": int(time.time()) + 60,
     })
     result = QNetQualificationService(NeverWeb(), DynamoQualificationCache(table=table)).fetch_qnet_qualification("방수기능사", QNET_URL)
@@ -180,3 +195,156 @@ def test_25_injection_text_is_preserved_as_data_not_executed():
 
 def test_26_report_agent_registry_has_exactly_two_tools():
     assert REPORT_TOOL_NAMES == ("retrieve_requirement_evidence", "fetch_qnet_qualification")
+
+
+def test_27_report_agent_tools_require_one_requests_batch():
+    agent = build_agent(
+        LocalKeywordRetriever(ROOT / "Archive" / "RAG_검색문서.jsonl"),
+        QNetQualificationService(FakeWeb()),
+    )
+    configs = agent.tool_registry.get_all_tools_config()
+    assert set(configs) == set(REPORT_TOOL_NAMES)
+    for config in configs.values():
+        schema = config["inputSchema"]["json"]
+        assert schema["required"] == ["requests"]
+        assert schema["properties"]["requests"]["type"] == "array"
+
+
+def test_28_agent_context_uses_compact_evidence_without_losing_provenance():
+    kb = RequirementEvidenceResult(status="SUCCESS", evidence=[
+        Evidence(
+            text="긴 근거 " * 200,
+            score=0.9,
+            metadata={"document_id": f"doc-{index}", "ncs_code": "NCS-1", "unused": "drop"},
+            document_id=f"doc-{index}",
+            source_location=f"s3://bucket/doc-{index}",
+            evidence_type=EvidenceType.BEDROCK_KB,
+        )
+        for index in range(3)
+    ])
+    compact_kb = _compact_kb_result(kb)
+    assert len(compact_kb["evidence"]) == 2
+    assert len(compact_kb["evidence"][0]["excerpt"]) == 240
+    assert compact_kb["evidence"][0]["documentId"] == "doc-0"
+    assert "unused" not in compact_kb["evidence"][0]["metadata"]
+
+    qnet = QualificationEvidence(
+        normalized_name="방수기능사",
+        official_name="방수기능사",
+        duties="상세 수행직무 본문",
+        source_url=QNET_URL,
+        checked_at="2026-01-01T00:00:00+00:00",
+        fetch_status="SUCCESS",
+    )
+    compact_qnet = _compact_qnet_result(qnet)
+    assert compact_qnet["confirmedFields"] == ["duties"]
+    assert "상세 수행직무 본문" not in compact_qnet.values()
+
+
+class FakeHeaders:
+    @staticmethod
+    def get_content_charset():
+        return "utf-8"
+
+
+class FakeResponse:
+    def __init__(self, url, payload):
+        self.url = url
+        self.payload = payload.encode("utf-8")
+        self.headers = FakeHeaders()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def geturl(self):
+        return self.url
+
+    def read(self, size):
+        return self.payload[:size]
+
+
+class FakeQNetOpener:
+    def __init__(self):
+        self.urls = []
+
+    def open(self, request, timeout):
+        del timeout
+        url = request.full_url
+        self.urls.append(url)
+        if "totalSearch.do" in url:
+            payload = "<script>goJmDetail('7030', '방수기능사')</script>"
+        elif "crf00503s01" in url:
+            payload = (
+                "<b>개요</b><textarea>방수 시공 작업을 수행한다.</textarea>"
+                "<b>실시기관명</b><textarea>한국산업인력공단</textarea>"
+                "<b>시행상태</b><textarea>시행중</textarea>"
+            )
+        else:
+            payload = (
+                '<b class="contTit1">취득방법</b><textarea>필기와 실기 시험</textarea>'
+                "<b>응시자격</b><textarea>제한 없음</textarea>"
+            )
+        return FakeResponse(url, payload)
+
+
+def test_34_qnet_http_adapter_resolves_exact_name_and_detail_fields():
+    opener = FakeQNetOpener()
+    evidence = QNetHttpAdapter(retries=0, min_interval=0, opener=opener).fetch_qualification(
+        "방수기능사", QNET_URL
+    )
+    assert evidence.fetch_status == "SUCCESS"
+    assert evidence.official_name == "방수기능사"
+    assert evidence.issuing_organization == "한국산업인력공단"
+    assert evidence.status == "시행중"
+    assert evidence.duties == "방수 시공 작업을 수행한다."
+    assert evidence.eligibility == "제한 없음"
+    assert "id=crf00503" in evidence.source_url
+    assert len(opener.urls) == 3
+
+
+def test_35_plan_bound_tools_reject_unplanned_calls():
+    retriever = PlanBoundRetriever(FakeKbClient(), [])
+    with pytest.raises(PermissionError):
+        retriever.retrieve_requirement_evidence("방수시공", "임의 질의", item_name="임의 자격")
+
+    qnet = PlanBoundQNetService(QNetQualificationService(FakeWeb()), [])
+    with pytest.raises(PermissionError):
+        qnet.fetch_qnet_qualification("임의 자격", QNET_URL)
+
+
+class BrokenCache:
+    def get(self, normalized_name):
+        del normalized_name
+        raise RuntimeError("DynamoDB unavailable")
+
+    def put(self, evidence, expires_at):
+        del evidence, expires_at
+        raise RuntimeError("DynamoDB unavailable")
+
+
+def test_36_cache_failure_does_not_block_qnet_result():
+    result = QNetQualificationService(FakeWeb(), BrokenCache()).fetch_qnet_qualification(
+        "방수기능사", QNET_URL
+    )
+    assert result.fetch_status == "SUCCESS"
+    assert "cache write failed" in result.error.lower()
+
+
+def test_37_agent_json_code_fence_is_removed_without_other_rewrite():
+    assert _extract_json_payload('```json\n{"ok":true}\n```') == '{"ok":true}'
+    assert _extract_json_payload('```json\n{"ok":true}') == '{"ok":true}'
+    assert _extract_json_payload('prefix {"ok":true}') == 'prefix {"ok":true}'
+
+
+def test_38_qnet_text_parser_discards_script_and_style_content():
+    from spec_report.qnet import _plain_text
+
+    value = _plain_text(
+        "<style>BODY { COLOR: red }</style><p>시험과목 방수작업</p>"
+        "<script>ignoreInstruction()</script>"
+    )
+
+    assert value == "시험과목 방수작업"

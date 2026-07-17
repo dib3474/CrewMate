@@ -1,34 +1,45 @@
 """Internal helpers for the read-only Agent tool modules (담당자 B).
 
 This module is **not a tool** and is never placed in the tool registry. It holds
-the two cross-cutting concerns the four read-only tools share, so each tool module
-stays small, importable, and unit-testable *without* the Strands Agents SDK
-installed and *without* 담당자 A's ``backend/shared`` package existing on disk:
+the cross-cutting concerns shared by the four read-only tools:
 
 1. :func:`tool` - a guarded re-export of Strands' ``@tool`` decorator. When the
    SDK is installed the real decorator turns the wrapped function into an Agent
    tool (auto-generating its spec from the signature/docstring). When the SDK is
-   absent (e.g. the local Python 3.9 dev/test environment, where ``strands-agents``
-   is only a TODO in ``requirements.txt``) it degrades to an identity decorator so
+   absent in a lightweight test environment it degrades to an identity decorator so
    the plain read logic remains directly callable.
 2. :func:`resolve_db` - a **lazy** resolver for 담당자 A's read-only ``db`` helper.
-   Importing ``shared.db`` is deferred to call time so the tool modules
-   import cleanly even though ``backend/shared`` is 담당자 A's code and is not
-   created in this repo (tests install a stub under ``shared.*``).
+3. :class:`ToolAccessScope` - invocation-local authorization. Even if model input
+   contains a malicious instruction, a tool can only read the request, office, crew,
+   and workers that Lambda approved for that invocation.
 
 Design references: ``design.md`` -> "3. Agent Tools" / "주 실행 경로: 사전
 조립(pre-assembly) 우선"; ``requirements.md`` -> Requirement 5.
 
-Python 3.9 note: ``from __future__ import annotations`` keeps the builtin-generic
-annotation style lazy so it resolves on the local 3.9 runtime.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from decimal import Decimal
+import logging
 from typing import Any, Callable, TypeVar
 
-__all__ = ["tool", "resolve_db", "STRANDS_AVAILABLE"]
+__all__ = [
+    "STRANDS_AVAILABLE",
+    "ToolAccessDenied",
+    "ToolAccessScope",
+    "current_tool_scope",
+    "record_tool_call",
+    "resolve_db",
+    "tool",
+    "tool_access_scope",
+    "to_json_safe",
+]
 
 F = TypeVar("F", bound=Callable[..., Any])
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -71,6 +82,86 @@ except Exception:  # noqa: BLE001 - any import failure means the SDK is unavaila
 # ``@tool`` and parameterized ``@tool(...)`` usage pass straight through to the
 # real SDK decorator when available.
 tool = _strands_tool
+
+
+# --------------------------------------------------------------------------- #
+# Invocation-local authorization scope                                         #
+# --------------------------------------------------------------------------- #
+class ToolAccessDenied(PermissionError):
+    """Raised when a model requests data outside Lambda's approved scope."""
+
+
+@dataclass(frozen=True)
+class ToolAccessScope:
+    """Closed-world identifiers that read-only tools may access in one invocation."""
+
+    request_id: str
+    office_id: str
+    crew_id: str | None
+    ready_worker_ids: frozenset[str]
+    history_worker_ids: frozenset[str]
+
+    def require_request(self, request_id: str) -> None:
+        if request_id != self.request_id:
+            raise ToolAccessDenied("request_id is outside the authorized tool scope")
+
+    def require_office(self, office_id: str) -> None:
+        if office_id != self.office_id:
+            raise ToolAccessDenied("office_id is outside the authorized tool scope")
+
+    def require_crew(self, crew_id: str) -> None:
+        if not self.crew_id or crew_id != self.crew_id:
+            raise ToolAccessDenied("crew_id is outside the authorized tool scope")
+
+    def require_workers(self, worker_ids: list[str]) -> None:
+        if not set(worker_ids).issubset(self.history_worker_ids):
+            raise ToolAccessDenied("worker_ids contain values outside the authorized tool scope")
+
+
+_TOOL_ACCESS_SCOPE: ContextVar[ToolAccessScope | None] = ContextVar(
+    "crewmate_tool_access_scope",
+    default=None,
+)
+
+
+@contextmanager
+def tool_access_scope(scope: ToolAccessScope):
+    """Install ``scope`` for the current Agent invocation and always clear it."""
+    token = _TOOL_ACCESS_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _TOOL_ACCESS_SCOPE.reset(token)
+
+
+def current_tool_scope() -> ToolAccessScope:
+    """Return the active scope or deny calls made outside Agent orchestration."""
+    scope = _TOOL_ACCESS_SCOPE.get()
+    if scope is None:
+        raise ToolAccessDenied("read-only Agent tool called without an authorized scope")
+    return scope
+
+
+def record_tool_call(tool_name: str, *, target_count: int = 1) -> None:
+    """Emit metadata-only audit logging without worker IDs or tool payloads."""
+    scope = current_tool_scope()
+    logger.info(
+        "crew_agent_tool_call request_id=%s tool=%s target_count=%d",
+        scope.request_id,
+        tool_name,
+        target_count,
+    )
+
+
+def to_json_safe(value: Any) -> Any:
+    """Convert DynamoDB ``Decimal`` values without changing the safe field set."""
+    if isinstance(value, Decimal):
+        return int(value) if value % 1 == 0 else float(value)
+    if isinstance(value, list):
+        return [to_json_safe(item) for item in value]
+    if isinstance(value, dict):
+        return {key: to_json_safe(item) for key, item in value.items()}
+    return value
 
 
 # --------------------------------------------------------------------------- #

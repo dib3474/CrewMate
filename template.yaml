@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
   CrewMate - 건설 일용직 작업조 편성 서버리스 백엔드 (계약 v2).
-  DynamoDB 엔터티별 테이블 8종 + Cognito + API Gateway + 코어/Agent Lambda.
+  DynamoDB 코어 테이블 8종과 보고서 메타데이터/캐시 + Cognito + API Gateway + 코어/Agent Lambda.
 
 # ---------------------------------------------------------------------------
 # 파라미터
@@ -24,27 +24,38 @@ Parameters:
   # --- Crew Composition Agent 설정 (비밀 아님) ---
   CrewAgentModelId:
     Type: String
-    Default: apac.anthropic.claude-sonnet-4-6
+    Default: global.anthropic.claude-sonnet-4-6
     Description: Amazon Bedrock 모델(추론 프로파일) ID.
+  CrewAgentFoundationModelId:
+    Type: String
+    Default: anthropic.claude-sonnet-4-6
+    Description: Crew Agent 추론 프로파일의 기반 모델 ID. InvokeModel IAM 범위에 사용.
   CrewAgentRegion:
     Type: String
     Default: ap-northeast-2
     Description: Bedrock 호출 리전 (CREW_AGENT_REGION).
+  CrewAgentTemperature:
+    Type: String
+    Default: "0.2"
   AgentFallbackEnabled:
     Type: String
-    Default: "false"
+    Default: "true"
     AllowedValues: ["true", "false"]
-    Description: Bedrock 실패 시 사전 준비된 데모 추천으로 폴백할지 여부.
+    Description: Bedrock 호출·검증 실패 시 결정론적 규칙 기반 추천으로 폴백할지 여부.
   AgentInvokeTimeoutSeconds:
     Type: String
-    Default: "25"
+    Default: "90"
     Description: 단일 Bedrock compose 호출의 벽시계 상한(초).
 
   # --- Applicant Spec Gap Report Agent 설정 ---
   ReportModelId:
     Type: String
-    Default: apac.anthropic.claude-sonnet-4-6
+    Default: global.anthropic.claude-sonnet-4-6
     Description: 보고서 작성용 Bedrock 모델 또는 inference profile ID.
+  ReportFoundationModelId:
+    Type: String
+    Default: anthropic.claude-sonnet-4-6
+    Description: Foundation model behind ReportModelId; used to scope InvokeModel IAM access.
   ReportModelRegion:
     Type: String
     Default: ap-northeast-2
@@ -53,25 +64,33 @@ Parameters:
     Default: "0.1"
   ReportAgentTimeoutSeconds:
     Type: String
-    Default: "30"
+    Default: "60"
   KnowledgeBaseId:
     Type: String
     Default: ""
     Description: 별도로 생성·동기화한 Amazon Bedrock Knowledge Base ID. 빈 값이면 KB 미구성으로 명시한다.
+  KnowledgeBaseRegion:
+    Type: String
+    Default: ap-northeast-2
+    Description: 외부 Amazon Bedrock Knowledge Base 리전.
   KbNumberOfResults:
     Type: String
     Default: "5"
   KbReviewStatus:
     Type: String
-    Default: 검토완료
-    Description: Retrieve metadata filter. 현재 Archive의 검토 전 문서는 이 값과 일치하지 않는다.
+    Default: 구조화원본
+    Description: Retrieve metadata filter. 검토되지 않은 자동 추천 문서와 구조화 원본을 분리한다.
   QnetCacheTtlSeconds:
     Type: String
     Default: "604800"
   ReportRetentionDays:
     Type: Number
-    Default: 30
-    MinValue: 1
+    Default: 61
+    MinValue: 61
+  ReportStandardIaTransitionDays:
+    Type: Number
+    Default: 31
+    MinValue: 31
 
 Conditions:
   HasKnowledgeBase: !Not [!Equals [!Ref KnowledgeBaseId, ""]]
@@ -277,6 +296,22 @@ Resources:
           - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
       VersioningConfiguration: { Status: Enabled }
 
+  KnowledgeSourceBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref KnowledgeSourceBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt KnowledgeSourceBucket.Arn
+              - !Sub "${KnowledgeSourceBucket.Arn}/*"
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
   ReportOutputBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -298,7 +333,27 @@ Resources:
           - Id: ExpireApplicantReports
             Status: Enabled
             Prefix: reports/
+            ObjectSizeGreaterThan: 0
+            Transitions:
+              - StorageClass: STANDARD_IA
+                TransitionInDays: !Ref ReportStandardIaTransitionDays
             ExpirationInDays: !Ref ReportRetentionDays
+
+  ReportOutputBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReportOutputBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt ReportOutputBucket.Arn
+              - !Sub "${ReportOutputBucket.Arn}/*"
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
 
   QualificationEvidenceCache:
     Type: AWS::DynamoDB::Table
@@ -321,12 +376,30 @@ Resources:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - { AttributeName: report_id, AttributeType: S }
+        - { AttributeName: owner_user_id, AttributeType: S }
+        - { AttributeName: created_at, AttributeType: S }
       KeySchema:
         - { AttributeName: report_id, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: OwnerCreatedAtIndex
+          KeySchema:
+            - { AttributeName: owner_user_id, KeyType: HASH }
+            - { AttributeName: created_at, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
       TimeToLiveSpecification:
         AttributeName: expires_at
         Enabled: true
       SSESpecification: { SSEEnabled: true }
+
+  AgentDepsLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "crewmate-agent-deps-${Stage}"
+      ContentUri: layers/agent_deps/
+      CompatibleRuntimes: [python3.12]
+      RetentionPolicy: Retain
+    Metadata:
+      BuildMethod: python3.12
 
   ReportDepsLayer:
     Type: AWS::Serverless::LayerVersion
@@ -456,6 +529,7 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref RequestsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CompaniesTable }
       Events:
         CreateApplication:
           Type: Api
@@ -478,9 +552,21 @@ Resources:
         OfferDecline:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/offer/decline, Method: post }
+        CancelReservation:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/reservation/cancel, Method: post }
         GetAssignments:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/assignments, Method: get }
+        GetAcceptedJobs:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/accepted-jobs, Method: get }
+        GetAttendance:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/attendance, Method: get }
+        GetWageStats:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/worker/wage-stats/{careerYears}", Method: get }
         GetHistory:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /worker/history, Method: get }
@@ -501,6 +587,7 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref AssignmentsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref OfficesTable }
       Events:
         CreateRequest:
           Type: Api
@@ -514,6 +601,9 @@ Resources:
         GetRequest:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/requests/{requestId}", Method: get }
+        CancelRequest:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/requests/{requestId}/cancel", Method: post }
         Checkin:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: "/company/crews/{crewId}/checkin/{workerId}", Method: post }
@@ -540,10 +630,15 @@ Resources:
         - DynamoDBCrudPolicy: { TableName: !Ref AssignmentsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref NotificationsTable }
+        - DynamoDBReadPolicy: { TableName: !Ref CompaniesTable }
+        - DynamoDBReadPolicy: { TableName: !Ref OfficesTable }
       Events:
         ListWorkers:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /office/workers, Method: get }
+        GetWorkerDetail:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/office/workers/{workerId}", Method: get }
         ListRequests:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /office/requests, Method: get }
@@ -616,8 +711,7 @@ Resources:
           Properties: { RestApiId: !Ref CrewMateApi, Path: /notifications/read, Method: post }
 
   # =========================================================================
-  # Crew Composition Agent 스택 (NORMAL agent-compose / EMERGENCY agent-recompose)
-  #   Bedrock 를 boto3(런타임 내장)로 직접 호출한다. 네이티브 의존성/레이어/Docker 불필요.
+  # Crew Composition Strands Agent (NORMAL agent-compose / EMERGENCY agent-recompose)
   # =========================================================================
   AgentInvokeFunction:
     Type: AWS::Serverless::Function
@@ -625,14 +719,18 @@ Resources:
       FunctionName: !Sub "crewmate-agent-invoke-${Stage}"
       CodeUri: backend/
       Handler: functions.agent_invoke.app.lambda_handler
-      Timeout: 60
+      Timeout: 120
       MemorySize: 512
+      Layers:
+        - !Ref AgentDepsLayer
       Environment:
         Variables:
           CREW_AGENT_MODEL_ID: !Ref CrewAgentModelId
           CREW_AGENT_REGION: !Ref CrewAgentRegion
+          CREW_AGENT_TEMPERATURE: !Ref CrewAgentTemperature
           AGENT_FALLBACK_ENABLED: !Ref AgentFallbackEnabled
           AGENT_INVOKE_TIMEOUT_S: !Ref AgentInvokeTimeoutSeconds
+          CREW_AGENT_ASYNC_ENABLED: "true"
       Policies:
         - DynamoDBCrudPolicy: { TableName: !Ref CrewsTable }
         - DynamoDBCrudPolicy: { TableName: !Ref GapEventsTable }
@@ -646,8 +744,11 @@ Resources:
                 - bedrock:InvokeModel
                 - bedrock:InvokeModelWithResponseStream
               Resource:
-                - "arn:aws:bedrock:*::foundation-model/*"
-                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+                - !Sub "arn:aws:bedrock:*::foundation-model/${CrewAgentFoundationModelId}"
+                - !Sub "arn:aws:bedrock:${CrewAgentRegion}:${AWS::AccountId}:inference-profile/${CrewAgentModelId}"
+            - Effect: Allow
+              Action: [lambda:InvokeFunction]
+              Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:crewmate-agent-invoke-${Stage}"
       Events:
         AgentCompose:
           Type: Api
@@ -666,7 +767,7 @@ Resources:
       Runtime: python3.13
       CodeUri: backend/
       Handler: functions.spec_report.app.lambda_handler
-      Timeout: 90
+      Timeout: 180
       MemorySize: 1024
       Layers:
         - !Ref ReportDepsLayer
@@ -677,6 +778,7 @@ Resources:
           REPORT_MODEL_TEMPERATURE: !Ref ReportModelTemperature
           REPORT_AGENT_TIMEOUT_SECONDS: !Ref ReportAgentTimeoutSeconds
           KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+          KNOWLEDGE_BASE_REGION: !Ref KnowledgeBaseRegion
           KB_NUMBER_OF_RESULTS: !Ref KbNumberOfResults
           KB_REVIEW_STATUS: !Ref KbReviewStatus
           KNOWLEDGE_SOURCE_BUCKET: !Ref KnowledgeSourceBucket
@@ -689,39 +791,61 @@ Resources:
           QNET_TIMEOUT_SECONDS: "5"
           QNET_MAX_RETRIES: "1"
           QNET_MIN_INTERVAL_SECONDS: "0.5"
+          REPORT_JOBS_TTL_SECONDS: "5270400"
       Policies:
-        - DynamoDBCrudPolicy: { TableName: !Ref QualificationEvidenceCache }
-        - DynamoDBCrudPolicy: { TableName: !Ref SpecReportJobs }
         - Statement:
+            - Sid: QualificationEvidenceCacheAccess
+              Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem]
+              Resource: !GetAtt QualificationEvidenceCache.Arn
+            - Sid: SpecReportJobMetadataAccess
+              Effect: Allow
+              Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
+              Resource:
+                - !GetAtt SpecReportJobs.Arn
+                - !Sub "${SpecReportJobs.Arn}/index/OwnerCreatedAtIndex"
             - Sid: ReadAuthoritativeRules
               Effect: Allow
               Action: [s3:GetObject]
               Resource: !Sub "${KnowledgeSourceBucket.Arn}/rules/*"
-            - Sid: WriteRequestedReportsOnly
+            - Sid: ReadWriteRequestedReportsOnly
               Effect: Allow
-              Action: [s3:PutObject]
+              Action: [s3:GetObject, s3:PutObject]
               Resource: !Sub "${ReportOutputBucket.Arn}/reports/*"
             - Sid: EncryptRequestedReports
               Effect: Allow
-              Action: [kms:Encrypt, kms:GenerateDataKey]
+              Action: [kms:Encrypt, kms:Decrypt, kms:GenerateDataKey]
               Resource: !GetAtt ReportKmsKey.Arn
+            - Sid: InvokeAsyncReportWorker
+              Effect: Allow
+              Action: [lambda:InvokeFunction]
+              Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:crewmate-spec-report-agent-${Stage}"
             - Sid: RetrieveConfiguredKnowledgeBase
               Effect: Allow
               Action: [bedrock:Retrieve]
               Resource: !If
                 - HasKnowledgeBase
-                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
-                - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/UNCONFIGURED"
+                - !Sub "arn:aws:bedrock:${KnowledgeBaseRegion}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}"
+                - !Sub "arn:aws:bedrock:${KnowledgeBaseRegion}:${AWS::AccountId}:knowledge-base/UNCONFIGURED"
             - Sid: InvokeReportModel
               Effect: Allow
               Action: [bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream]
               Resource:
-                - "arn:aws:bedrock:*::foundation-model/*"
-                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+                - !Sub "arn:aws:bedrock:*::foundation-model/${ReportFoundationModelId}"
+                - !Sub "arn:aws:bedrock:${ReportModelRegion}:${AWS::AccountId}:inference-profile/${ReportModelId}"
       Events:
         GenerateSpecReport:
           Type: Api
           Properties: { RestApiId: !Ref CrewMateApi, Path: /reports/spec-gap, Method: post }
+        StartSpecReportJob:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /reports/spec-gap/jobs, Method: post }
+        GetSpecReportJob:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: "/reports/spec-gap/jobs/{reportId}", Method: get }
+        ListSpecReportJobs:
+          Type: Api
+          Properties: { RestApiId: !Ref CrewMateApi, Path: /reports/spec-gap/jobs, Method: get }
 
 # ---------------------------------------------------------------------------
 # 출력값
@@ -765,3 +889,8 @@ Outputs:
     Value: !GetAtt ReportKmsKey.Arn
   SpecReportApiPath:
     Value: !Sub "https://${CrewMateApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/reports/spec-gap"
+  SpecReportFunctionName:
+    Value: !Ref SpecReportAgentFunction
+  ExternalKnowledgeBaseId:
+    Condition: HasKnowledgeBase
+    Value: !Ref KnowledgeBaseId

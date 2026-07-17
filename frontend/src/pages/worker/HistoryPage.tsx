@@ -1,69 +1,26 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api/client';
-import type { WorkHistoryEntry, AcceptedJob, AttendanceMap } from '../../api/types';
+import type { WorkHistoryEntry } from '../../api/types';
 import { tradeLabel } from '../../lib/trades';
-import AttendanceHeatmap from '../../components/AttendanceHeatmap';
-
-const JOB_STATUS_LABEL: Record<string, string> = {
-  RESERVED: '배차 완료', RUNNING: '작업 중', COMPLETED: '완료',
-  CANCELLED: '취소', NO_SHOW: '노쇼', LEFT_SITE: '이탈', DECLINED: '거절',
-};
 
 export default function HistoryPage() {
   const navigate = useNavigate();
   const [history, setHistory] = useState<WorkHistoryEntry[] | null>(null);
-  const [accepted, setAccepted] = useState<AcceptedJob[]>([]);
-  const [attendance, setAttendance] = useState<AttendanceMap>({});
 
   const load = useCallback(async () => {
-    const [h, a, at] = await Promise.all([
-      api.get<WorkHistoryEntry[]>('/worker/history'),
-      api.get<AcceptedJob[]>('/worker/accepted-jobs'),
-      api.get<AttendanceMap>('/worker/attendance'),
-    ]);
+    const h = await api.get<WorkHistoryEntry[]>('/worker/history');
     if (h.success) setHistory(h.data);
-    if (a.success) setAccepted(a.data);
-    if (at.success) setAttendance(at.data);
   }, []);
 
   useEffect(() => { load(); }, [load]);
 
   return (
     <div className="max-w-lg mx-auto space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h2 className="text-xl font-semibold text-gray-800">작업 이력</h2>
         <button onClick={() => navigate('/worker')}
           className="text-sm text-gray-500 hover:text-gray-800">← 돌아가기</button>
-      </div>
-
-      {/* 출근일 히트맵 (잔디) */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h3 className="text-sm font-medium text-gray-500 mb-3">출근 기록</h3>
-        <AttendanceHeatmap attendance={attendance} />
-      </div>
-
-      {/* 수락한 작업 */}
-      <div className="bg-white rounded-lg border border-gray-200 p-4">
-        <h3 className="text-sm font-medium text-gray-500 mb-3">수락한 작업 ({accepted.length})</h3>
-        {accepted.length === 0 ? (
-          <p className="text-sm text-gray-400">수락한 작업이 없습니다.</p>
-        ) : (
-          <div className="space-y-2">
-            {accepted.map((job, idx) => (
-              <div key={idx} className="flex items-center justify-between text-sm border border-gray-100 rounded-md px-3 py-2">
-                <div>
-                  <p className="font-medium text-gray-800">{job.site_name}</p>
-                  <p className="text-xs text-gray-500">{job.work_date} · {tradeLabel(job.assigned_trade)}</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-gray-700">{job.offered_wage.toLocaleString()}원</p>
-                  <p className="text-xs text-gray-400">{JOB_STATUS_LABEL[job.status] || job.status}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* 완료 이력 */}
@@ -81,15 +38,41 @@ export default function HistoryPage() {
         ) : history.length === 0 ? (
           <p className="text-sm text-gray-400">아직 완료된 작업이 없습니다.</p>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {history.map((entry, idx) => (
-              <div key={idx} className="flex items-center justify-between text-sm border border-gray-100 rounded-md px-3 py-2">
-                <div>
-                  <p className="font-medium text-gray-800">{entry.site_name}</p>
-                  <p className="text-xs text-gray-500">{entry.work_date} · {tradeLabel(entry.assigned_trade)}</p>
+              <article key={`${entry.crew_id}-${idx}`} className="text-sm border border-gray-200 rounded-lg p-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-gray-800">{entry.site_name}</p>
+                    {entry.company_name && <p className="text-xs text-gray-500 mt-0.5">{entry.company_name}</p>}
+                  </div>
+                  <span className="font-medium text-orange-700 whitespace-nowrap">{entry.offered_wage.toLocaleString()}원</span>
                 </div>
-                <span className="text-gray-700">{entry.offered_wage.toLocaleString()}원</span>
-              </div>
+                <dl className="grid grid-cols-[72px_1fr] gap-x-3 gap-y-1.5 mt-3 text-xs">
+                  <dt className="text-gray-400">근무 일시</dt>
+                  <dd className="text-gray-700">{entry.work_date}{entry.start_time ? ` ${entry.start_time}` : ''}</dd>
+                  <dt className="text-gray-400">현장 위치</dt>
+                  <dd className="text-gray-700">{entry.location_text || '정보 없음'}</dd>
+                  <dt className="text-gray-400">담당 직종</dt>
+                  <dd className="text-gray-700">{tradeLabel(entry.assigned_trade)}</dd>
+                  {entry.required_workers && entry.required_workers.length > 0 && (
+                    <>
+                      <dt className="text-gray-400">현장 인원</dt>
+                      <dd className="text-gray-700">
+                        {entry.required_workers.map((worker) => `${tradeLabel(worker.trade)} ${worker.count}명`).join(', ')}
+                      </dd>
+                    </>
+                  )}
+                  <dt className="text-gray-400">완료 처리</dt>
+                  <dd className="text-gray-700">{new Date(entry.completed_at).toLocaleString('ko-KR')}</dd>
+                </dl>
+                {entry.notes && (
+                  <div className="mt-3 pt-3 border-t border-gray-100">
+                    <p className="text-xs text-gray-400 mb-1">작업 메모</p>
+                    <p className="text-xs leading-5 text-gray-600 whitespace-pre-wrap">{entry.notes}</p>
+                  </div>
+                )}
+              </article>
             ))}
           </div>
         )}

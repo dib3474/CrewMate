@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence
 
-from ._shared import resolve_db, tool
+from ._shared import current_tool_scope, record_tool_call, resolve_db, to_json_safe, tool
 
 _JUDGMENT_FIELDS = ("career_years", "certifications")
 
@@ -20,7 +20,7 @@ def _read_worker_history(worker_ids: Sequence[str], *, db: Any = None) -> Dict[s
     각 근로자의 Assignments(GSI1)에서 참여 crew 집합을 구해, 주어진 근로자들 간
     같은 crew 공유 횟수를 협업 횟수로 집계한다. 개인정보·성실도는 제외한다.
     """
-    ids = list(worker_ids)
+    ids = list(dict.fromkeys(worker_ids))
     helper = resolve_db(db)
 
     crews_by_worker: Dict[str, set] = {}
@@ -51,7 +51,7 @@ def _read_worker_history(worker_ids: Sequence[str], *, db: Any = None) -> Dict[s
                 limited[f] = rec[f]
         workers.append(limited)
 
-    return {"workers": workers, "collaboration_pairs": pairs}
+    return to_json_safe({"workers": workers, "collaboration_pairs": pairs})
 
 
 @tool
@@ -65,4 +65,6 @@ def get_worker_history(worker_ids: List[str]) -> Dict[str, Any]:
         {workers: [{worker_id, career_years, certifications, collaboration_count}],
          collaboration_pairs: [{worker_a, worker_b, count}]}.
     """
+    current_tool_scope().require_workers(worker_ids)
+    record_tool_call("get_worker_history", target_count=len(set(worker_ids)))
     return _read_worker_history(worker_ids)

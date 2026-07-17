@@ -29,12 +29,15 @@ const STATE_CONFIG: Record<WorkerState, { label: string; color: string }> = {
   RUNNING: { label: '작업 중', color: 'bg-orange-100 text-orange-700' },
 };
 
+type SortKey = 'name' | 'career_desc' | 'wage_asc' | 'wage_desc' | 'completed_desc';
+
 export default function WorkersPage() {
   const navigate = useNavigate();
   const [filterTrade, setFilterTrade] = useState<Trade | ''>('');
   const [filterState, setFilterState] = useState<WorkerState | ''>('READY');
   const [filterMinCareer, setFilterMinCareer] = useState(0);
   const [filterMaxWage, setFilterMaxWage] = useState(300000);
+  const [sortBy, setSortBy] = useState<SortKey>('name');
 
   const fetchWorkers = useCallback(async () => {
     const res = await api.get<Worker[]>('/office/workers');
@@ -49,15 +52,22 @@ export default function WorkersPage() {
 
   const filtered = (workers || []).filter((w) => {
     if (filterState && w.state !== filterState) return false;
-    if (filterTrade && !w.preferred_trades.includes(filterTrade)) return false;
+    if (filterTrade === 'GENERAL' && w.excluded_trades.includes('GENERAL')) return false;
+    if (filterTrade && filterTrade !== 'GENERAL' && !w.preferred_trades.includes(filterTrade)) return false;
     if (w.career_years < filterMinCareer) return false;
     if (w.desired_daily_wage > filterMaxWage) return false;
     return true;
+  }).sort((a, b) => {
+    if (sortBy === 'career_desc') return b.career_years - a.career_years || a.name.localeCompare(b.name, 'ko');
+    if (sortBy === 'wage_asc') return a.desired_daily_wage - b.desired_daily_wage || a.name.localeCompare(b.name, 'ko');
+    if (sortBy === 'wage_desc') return b.desired_daily_wage - a.desired_daily_wage || a.name.localeCompare(b.name, 'ko');
+    if (sortBy === 'completed_desc') return b.completed_count - a.completed_count || a.name.localeCompare(b.name, 'ko');
+    return a.name.localeCompare(b.name, 'ko');
   });
 
   return (
     <div className="max-w-5xl mx-auto space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h2 className="text-xl font-semibold text-gray-800">소속 근로자</h2>
         <button onClick={() => navigate('/office')} className="text-sm text-gray-500 hover:text-gray-800">
           ← 요청 목록으로
@@ -77,6 +87,20 @@ export default function WorkersPage() {
             <option value="READY">대기 중 (READY)</option>
             <option value="INACTIVE">비활성</option>
             <option value="RUNNING">작업 중</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">정렬</label>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as SortKey)}
+            className="border border-gray-300 rounded px-2 py-1.5 text-sm"
+          >
+            <option value="name">이름순</option>
+            <option value="career_desc">경력 높은순</option>
+            <option value="wage_asc">희망 일당 낮은순</option>
+            <option value="wage_desc">희망 일당 높은순</option>
+            <option value="completed_desc">완료 작업 많은순</option>
           </select>
         </div>
         <div>
@@ -121,8 +145,8 @@ export default function WorkersPage() {
       {loading && !workers ? (
         <p className="text-center text-gray-400 py-6">불러오는 중...</p>
       ) : (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="bg-white rounded-lg border border-gray-200 overflow-x-auto">
+          <table className="w-full text-sm min-w-[720px]">
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 text-gray-500 font-medium">이름</th>
@@ -137,8 +161,18 @@ export default function WorkersPage() {
               {filtered.map((w) => {
                 const stateInfo = STATE_CONFIG[w.state];
                 return (
-                  <tr key={w.worker_id} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium text-gray-800">{w.name}</td>
+                  <tr key={w.worker_id}
+                    tabIndex={0}
+                    role="link"
+                    onClick={() => navigate(`/office/workers/${w.worker_id}`)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') navigate(`/office/workers/${w.worker_id}`);
+                    }}
+                    className="hover:bg-purple-50 cursor-pointer focus:outline-none focus:bg-purple-50">
+                    <td className="px-4 py-3 font-medium text-gray-800">
+                      {w.name}
+                      <span className="block text-[11px] font-normal text-purple-600">지원서 상세 보기</span>
+                    </td>
                     <td className="px-4 py-3 text-gray-600">
                       <div className="flex flex-wrap gap-1">
                         {w.preferred_trades.map((t) => (

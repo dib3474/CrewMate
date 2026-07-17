@@ -13,7 +13,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._shared import resolve_db, tool
+from ._shared import current_tool_scope, record_tool_call, resolve_db, to_json_safe, tool
+
+_SAFE_CREW_FIELDS = (
+    "crew_id",
+    "request_id",
+    "status",
+    "member_ids",
+    "proposed_members",
+    "total_cost",
+)
 
 
 def _read_current_crew(crew_id: str, *, db: Any = None) -> Any:
@@ -23,23 +32,26 @@ def _read_current_crew(crew_id: str, *, db: Any = None) -> Any:
     dependency-injected for tests; otherwise 담당자 A's ``shared.db`` is
     resolved lazily.
     """
-    return resolve_db(db).get_crew(crew_id)
+    item = resolve_db(db).get_crew(crew_id)
+    if not item:
+        return None
+    return to_json_safe({field: item[field] for field in _SAFE_CREW_FIELDS if field in item})
 
 
 @tool
 def get_current_crew(crew_id: str) -> Any:
-    """Return the current crew: members, active members, gaps, and requirements.
+    """현재 호출에 허용된 작업조의 안전한 최신 상태를 반환한다.
 
-    Use this during emergency re-composition to see which members are still on the
-    crew, which are active, where the gaps are, and the crew's required conditions,
-    so the retained members can be kept and only the shortage filled. This tool is
-    read-only and never changes any state.
+    EMERGENCY에서 작업조 ID, 상태, 현재 멤버와 배정 직종을 확인할 때 사용한다.
+    실제 결원 직종과 잔여 예산은 AgentInput의 Lambda 계산값을 따른다. 읽기 전용이며
+    상태를 변경하지 않는다.
 
     Args:
-        crew_id: The identifier of the crew to look up.
+        crew_id: AgentInput에 포함된 허용 작업조 ID.
 
     Returns:
-        The current crew record (current members, active members, gaps, and
-        required conditions).
+        작업조 ID, 요청 ID, 상태, 멤버, 배정 직종과 비용의 안전 필드.
     """
+    current_tool_scope().require_crew(crew_id)
+    record_tool_call("get_current_crew")
     return _read_current_crew(crew_id)

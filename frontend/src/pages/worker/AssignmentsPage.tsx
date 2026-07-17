@@ -2,19 +2,13 @@ import { useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../../api/client';
 import { usePolling } from '../../hooks/usePolling';
-
-interface Assignment {
-  crew_id: string;
-  request_id: string;
-  site_name: string;
-  work_date: string;
-  start_time: string;
-  location_text: string;
-  status: string;
-}
+import type { WorkerAssignment } from '../../api/types';
+import { tradeLabel } from '../../lib/trades';
 
 const STATUS_LABEL: Record<string, { label: string; color: string }> = {
   APPROVED: { label: '승인됨', color: 'bg-blue-100 text-blue-700' },
+  NOTIFIED: { label: '수락 확인 중', color: 'bg-purple-100 text-purple-700' },
+  DISPATCHED: { label: '배차 완료', color: 'bg-blue-100 text-blue-700' },
   RUNNING: { label: '작업 중', color: 'bg-orange-100 text-orange-700' },
   COMPLETED: { label: '완료', color: 'bg-green-100 text-green-700' },
 };
@@ -23,12 +17,12 @@ export default function AssignmentsPage() {
   const navigate = useNavigate();
 
   const fetchAssignments = useCallback(async () => {
-    const res = await api.get<Assignment[]>('/worker/assignments');
+    const res = await api.get<WorkerAssignment[]>('/worker/assignments');
     if (res.success) return res.data;
     return [];
   }, []);
 
-  const { data: assignments, loading } = usePolling<Assignment[]>({
+  const { data: assignments, loading } = usePolling<WorkerAssignment[]>({
     fetchFn: fetchAssignments,
     interval: 5000,
   });
@@ -87,10 +81,33 @@ export default function AssignmentsPage() {
                 </div>
               </div>
 
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <span className="text-gray-500">배정 직종</span>
+                  <p className="font-medium text-gray-800">{tradeLabel(assignment.assigned_trade)}</p>
+                </div>
+                <div>
+                  <span className="text-gray-500">확정 일당</span>
+                  <p className="font-medium text-gray-800">{(assignment.offered_wage || 0).toLocaleString()}원</p>
+                </div>
+              </div>
+
               <div className="text-sm">
                 <span className="text-gray-500">위치</span>
                 <p className="font-medium text-gray-800">{assignment.location_text}</p>
               </div>
+              {assignment.eta && (
+                <div className="text-sm">
+                  <span className="text-gray-500">예상 도착</span>
+                  <p className="font-medium text-gray-800">{assignment.eta}</p>
+                </div>
+              )}
+              {assignment.notes && (
+                <div className="text-sm bg-gray-50 rounded-md p-3">
+                  <span className="text-gray-500">작업 요청사항</span>
+                  <p className="font-medium text-gray-800 mt-1 whitespace-pre-wrap">{assignment.notes}</p>
+                </div>
+              )}
             </div>
           </div>
         );

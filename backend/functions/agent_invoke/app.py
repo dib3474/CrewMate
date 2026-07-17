@@ -10,19 +10,26 @@ Route (OFFICE 전용):
 - 예산: NORMAL=budget, EMERGENCY=budget − 고정 인원 offered_wage 합.
 - EMERGENCY 후보에서 declined_worker_ids 제외. fixed_members 불변.
 - 추천 사유에 개인 부정 평가·확률 수치·최적 보장 표현 금지.
-- LLM(Strands+Bedrock) 추천을 우선 시도하고, 검증 실패 시 1회 재시도, 그래도 실패하거나
-  Bedrock 미가용 시 결정론적 폴백으로 동일 규칙의 추천을 생성한다(데모 안정성).
+- Strands+Bedrock 추천을 우선 시도하고, 호출 또는 검증 실패 시 설정에 따라 결정론적
+  폴백으로 동일 규칙의 추천을 생성한다.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
+import re
+from collections import Counter
 from typing import Any
 
+from pydantic import ValidationError
+
+from agent.crew_agent import BedrockUnavailable, compose as compose_crew
+from agent.schemas import AgentInput, AgentOutput
 from shared import db
-from shared.auth import Principal
+from shared.auth import Principal, get_principal
 from shared.crew import assemble_crew_members
 from shared.responses import ApiError, ErrorCode, success
 from shared.routing import Router
@@ -38,6 +45,8 @@ logger = logging.getLogger()
 router = Router()
 
 FALLBACK_ENABLED = os.environ.get("AGENT_FALLBACK_ENABLED", "false").lower() == "true"
+ASYNC_ENABLED = os.environ.get("CREW_AGENT_ASYNC_ENABLED", "false").lower() == "true"
+_LAMBDA_CLIENT = None
 
 
 # ---------------------------------------------------------------------------
@@ -58,14 +67,24 @@ def agent_compose(_event, principal: Principal, params):
     ]
     needed = _flatten_required(request.get("required_workers", []))
     if len(candidates) < len(needed):
-        raise ApiError(ErrorCode.AGENT_RETRY_FAILED,
-                       "READY 상태 후보가 부족하여 AI 편성에 실패했습니다. 수동 편성으로 진행해주세요.")
+        raise ApiError(
+            ErrorCode.AGENT_RETRY_FAILED,
+            f"편성에 필요한 인원은 {len(needed)}명이지만 현재 대기 중인 후보는 "
+            f"{len(candidates)}명입니다. 근로자 대기 상태와 필요 인원을 확인해주세요.",
+        )
 
-    recs = _recommend(candidates, needed, int(request.get("budget", 0)),
-                      priority=request.get("priority"), request=request)
+    budget = int(request.get("budget", 0))
+    recs = _recommend(candidates, needed, budget,
+                      mode="NORMAL", priority=request.get("priority"), request=request)
     if not recs:
-        raise ApiError(ErrorCode.AGENT_RETRY_FAILED,
-                       "예산 범위 내에서 가능한 조합을 찾지 못했습니다. 예산 조정 또는 수동 편성이 필요합니다.")
+        recs = _rule_based_recommendations(
+            candidates,
+            needed,
+            budget=budget,
+            priority=request.get("priority"),
+        )
+    if not recs:
+        raise ApiError(ErrorCode.AGENT_RETRY_FAILED, _composition_failure_reason(candidates, needed))
 
     _cancel_existing_crews(request["request_id"])
     top = recs[0]
@@ -124,12 +143,21 @@ def agent_recompose(_event, principal: Principal, params):
     budget = int(request.get("budget", 0))
     remaining = (budget - fixed_cost) if budget > 0 else 0
     recs = _recommend(candidates, gap_trades, remaining,
+                      mode="EMERGENCY", fixed_members=fixed,
                       priority=request.get("priority"), request=request,
+                      crew_id=crew["crew_id"],
                       context_worker_ids=[m["worker_id"] for m in fixed])
     if not recs:
+        recs = _rule_based_recommendations(
+            candidates,
+            gap_trades,
+            budget=remaining,
+            priority=request.get("priority"),
+            context_worker_ids=[m["worker_id"] for m in fixed],
+        )
+    if not recs:
         _set_gap_status(gap["event_id"], GapStatus.FAILED)
-        raise ApiError(ErrorCode.AGENT_RETRY_FAILED,
-                       "대체 가능한 인력을 찾지 못했습니다. 수동 편성 또는 편성 취소가 필요합니다.")
+        raise ApiError(ErrorCode.AGENT_RETRY_FAILED, _composition_failure_reason(candidates, gap_trades))
 
     now = now_iso()
     db.update_gap_event(
@@ -147,7 +175,7 @@ def agent_recompose(_event, principal: Principal, params):
 
 
 # ---------------------------------------------------------------------------
-# 추천 엔진: LLM(선택) → 검증 → 결정론적 폴백
+# 추천 엔진: Strands Agent → 독립 검증 → 설정 기반 결정론적 폴백
 # ---------------------------------------------------------------------------
 CAREER_NORM = 15          # career_years 정규화 상한(년)
 TEAM_NORM = 3             # 협업 횟수 정규화 상한
@@ -208,8 +236,9 @@ class _CollabIndex:
         return out
 
 
-def _recommend(candidates, needed_trades, budget, *, priority=None,
-               request=None, context_worker_ids=None) -> list[dict[str, Any]]:
+def _recommend(candidates, needed_trades, budget, *, mode="NORMAL", fixed_members=None,
+               priority=None, request=None, crew_id=None,
+               context_worker_ids=None) -> list[dict[str, Any]]:
     """LLM 추천을 우선 시도하고(가용 시), 검증 실패 시 결정론적 추천으로 폴백한다.
 
     priority(순위)·경력·협업 이력을 종합해 정렬/평가하고, 각 추천안에 적합도(fitness %)를 부여한다.
@@ -221,12 +250,23 @@ def _recommend(candidates, needed_trades, budget, *, priority=None,
     wage_lo, wage_hi = min(wages), max(wages)
 
     recs = None
-    llm_recs = _try_llm(candidates, needed_trades, budget, priority, request, collab)
+    llm_recs = _try_strands(
+        candidates,
+        needed_trades,
+        budget,
+        mode=mode,
+        fixed_members=fixed_members,
+        priority=priority,
+        request=request,
+        crew_id=crew_id,
+    )
     if llm_recs:
         valid = [r for r in llm_recs if _valid_rec(r, candidates, needed_trades, budget)]
         if valid:
             recs = valid[:3]
     if recs is None:
+        if os.environ.get("CREW_AGENT_MODEL_ID") and not FALLBACK_ENABLED:
+            return []
         recs = _greedy(candidates, needed_trades, budget, weights, collab, context_ids)
 
     for i, r in enumerate(recs, start=1):
@@ -235,131 +275,267 @@ def _recommend(candidates, needed_trades, budget, *, priority=None,
     return recs
 
 
-_BEDROCK_SYSTEM = (
-    "당신은 건설 일용직 작업조 편성 추천 AI입니다. 제공된 후보 근로자만으로 요청 직종·인원을 "
-    "정확히 충족하는 작업조 조합을 1~3개 추천합니다.\n"
-    "규칙(엄수): (1) 후보 목록 밖 worker_id 생성 금지. (2) 각 멤버의 assigned_trade는 그 근로자의 "
-    "excluded_trades에 포함되면 안 됨(가능하면 preferred_trades 내에서 배정). (3) 필요 직종별 인원을 "
-    "정확히 충족(미달·초과 금지). trade가 \"ANY\"인 요구는 직종 무관이며 어떤 후보로도 채울 수 있다"
-    "(이때 assigned_trade는 후보의 preferred_trades 중 하나 또는 GENERAL을 사용). "
-    "(4) 한 추천 안에서 worker_id 중복 금지. (5) offered_wage 합이 예산 이내. "
-    "(6) priority는 cost·career·teamwork의 우선순위 순위(1=최우선, 3=최하위)이며, 순위가 높은(숫자가 "
-    "작은) 축을 더 크게 반영한다: cost=인건비 저렴, career=career_years 많음, teamwork=collaboration_pairs "
-    "협업 이력 많음. (7) 사유는 업무 정보 중심, 특정 근로자 부정 평가·확률 수치·최적 보장 표현 금지.\n"
-    "출력은 아래 JSON 하나만. 다른 텍스트·코드펜스 금지:\n"
-    '{"recommendations":[{"members":[{"worker_id":"..","assigned_trade":".."'
-    ',"offered_wage":0}],"reason":"..","considerations":["..",".."]}]}'
-)
+def _rule_based_recommendations(
+    candidates,
+    needed_trades,
+    *,
+    budget,
+    priority=None,
+    context_worker_ids=None,
+) -> list[dict[str, Any]]:
+    """Return an executable combination even when only the configured budget blocks it."""
+    weights = _priority_weights(priority)
+    collab = _CollabIndex()
+    context_ids = list(context_worker_ids or [])
+    recs = _greedy(candidates, needed_trades, 0, weights, collab, context_ids)
+    if not recs:
+        return []
+    wages = [int(worker.get("desired_daily_wage", 0)) for worker in candidates] or [0]
+    wage_lo, wage_hi = min(wages), max(wages)
+    for rank, rec in enumerate(recs, start=1):
+        rec["rank"] = rank
+        rec["fitness"] = _fitness_percent(
+            rec["members"], weights, collab, context_ids, wage_lo, wage_hi
+        )
+        excess = rec["total_cost"] - int(budget or 0)
+        if budget and excess > 0:
+            warning = f"⚠ 예산 {excess:,}원 초과 — 임금 수정 필요"
+            rec["reason"] = (
+                f"{warning}. 필요한 직종과 인원은 충족하므로 임금을 조정한 뒤 승인할 수 있습니다."
+            )
+            rec["considerations"] = list(dict.fromkeys([
+                *[
+                    item for item in rec.get("considerations", [])
+                    if "예산 범위" not in item
+                ],
+                warning,
+            ]))
+    return recs
 
 
-def _try_llm(candidates, needed_trades, budget, priority=None, request=None, collab=None):
-    """Amazon Bedrock(boto3 converse) 직접 호출로 추천 생성. 미가용/오류 시 None → 결정론 폴백.
+def _composition_failure_reason(candidates, needed_trades) -> str:
+    """Explain why no combination exists without exposing worker identifiers."""
+    if not candidates:
+        return "현재 대기 중인 근로자가 없어 작업조를 구성할 수 없습니다. 근로자의 대기 상태를 확인해주세요."
+    shortages = []
+    required = Counter(needed_trades)
+    for trade, count in required.items():
+        if trade == "ANY":
+            available = sum(1 for worker in candidates if _assign_any_trade(worker) is not None)
+        else:
+            available = sum(
+                1 for worker in candidates
+                if trade not in (worker.get("excluded_trades") or [])
+            )
+        if available < count:
+            shortages.append(f"{_HUMAN_TRADE_LABELS.get(trade, trade)} {count - available}명 부족")
+    if shortages:
+        return "배치 가능한 후보가 부족합니다: " + ", ".join(shortages) + ". 근로자 직종 제외 조건을 확인해주세요."
+    return "각 직종 후보는 있으나 한 근로자를 중복 배정하지 않고 모든 조건을 동시에 충족하는 조합이 없습니다. 필요 인원이나 직종 조건을 조정해주세요."
 
-    Strands/pydantic 등 네이티브 의존성 없이 Lambda 런타임의 boto3만 사용한다(레이어·Docker 불필요).
-    우선순위(순위)·협업 이력(collaboration_pairs)·현장/일시를 함께 전달한다.
-    """
-    import json as _json
-    from collections import Counter
 
+def _priority_for_agent(priority) -> dict[str, int] | None:
+    if not isinstance(priority, dict):
+        return None
     try:
-        import boto3
-        from botocore.config import Config
-    except Exception:  # noqa: BLE001
+        normalized = {axis: int(priority[axis]) for axis in _PRIORITY_AXES}
+    except (KeyError, TypeError, ValueError):
         return None
+    return normalized if sorted(normalized.values()) == [1, 2, 3] else None
 
-    model_id = os.environ.get("CREW_AGENT_MODEL_ID")
-    if not model_id:
-        return None
-    region = os.environ.get("CREW_AGENT_REGION") or os.environ.get("AWS_REGION") or "ap-northeast-2"
-    timeout_s = float(os.environ.get("AGENT_INVOKE_TIMEOUT_S", "25"))
 
-    need = Counter(needed_trades)
-    cand_summary = [
-        {
-            "worker_id": w["worker_id"],
-            "preferred_trades": list(w.get("preferred_trades") or []),
-            "excluded_trades": list(w.get("excluded_trades") or []),
-            "desired_daily_wage": int(w.get("desired_daily_wage", 0)),
-            "career_years": int(w.get("career_years", 0)),
-        }
-        for w in candidates
-    ]
-    collab_pairs = collab.pairs([w["worker_id"] for w in candidates]) if collab is not None else []
+def _build_agent_input(
+    candidates,
+    needed_trades,
+    budget,
+    *,
+    mode,
+    fixed_members=None,
+    priority=None,
+    request=None,
+    crew_id=None,
+) -> AgentInput:
+    """Build identifiers, constraints, and the candidate allowlist for the Agent."""
     req = request or {}
-    user_msg = _json.dumps(
+    need = Counter(needed_trades)
+    fixed = [
         {
-            "required_workers": [{"trade": t, "count": c} for t, c in need.items()],
-            "budget": budget if budget and budget > 0 else None,
-            "priority": priority if isinstance(priority, dict) else None,
-            "site": req.get("site_name") or "",
-            "work_date": req.get("work_date") or "",
-            "start_time": req.get("start_time") or "",
-            "candidates": cand_summary,
-            "collaboration_pairs": collab_pairs,
+            "worker_id": item["worker_id"],
+            "assigned_trade": item["assigned_trade"],
+            "offered_wage": int(item["offered_wage"]),
+        }
+        for item in (fixed_members or [])
+    ]
+    candidate_ids = list(dict.fromkeys(item["worker_id"] for item in candidates))
+    return AgentInput.model_validate({
+        "mode": mode,
+        "request": {
+            "request_id": str(req.get("request_id") or "UNKNOWN"),
+            "office_id": str(req.get("office_id") or ""),
+            "crew_id": str(crew_id) if crew_id else None,
+            "required_workers": [
+                {"trade": trade, "count": count} for trade, count in need.items()
+            ],
+            "budget": max(int(budget or 0), 0),
+            "priority": _priority_for_agent(priority),
+            "site": str(req.get("site_name") or req.get("site") or ""),
+            "work_date": str(req.get("work_date") or ""),
+            "start_time": str(req.get("start_time") or ""),
         },
-        ensure_ascii=False,
-    )
+        "fixed_members": fixed,
+        "candidate_worker_ids": candidate_ids,
+    })
 
-    try:
-        client = boto3.client(
-            "bedrock-runtime",
-            region_name=region,
-            config=Config(read_timeout=timeout_s, connect_timeout=5, retries={"max_attempts": 0}),
-        )
-        resp = client.converse(
-            modelId=model_id,
-            system=[{"text": _BEDROCK_SYSTEM}],
-            messages=[{"role": "user", "content": [{"text": user_msg}]}],
-            inferenceConfig={"maxTokens": 1500, "temperature": 0.2},
-        )
-        text = "".join(
-            block.get("text", "")
-            for block in resp["output"]["message"]["content"]
-            if isinstance(block, dict)
-        )
-    except Exception:  # noqa: BLE001 - Bedrock 미가용/타임아웃/권한
-        logger.info("bedrock_unavailable_fallback_deterministic")
+
+def _agent_output_recommendations(
+    output: AgentOutput,
+    candidates,
+    *,
+    expected_mode: str,
+    expected_request_id: str,
+) -> list[dict[str, Any]] | None:
+    """Convert strict AgentOutput to the API recommendation shape without trusting it."""
+    if output.mode != expected_mode or output.request_id != expected_request_id:
         return None
-
-    return _parse_llm_recs(text, candidates)
-
-
-def _parse_llm_recs(text, candidates):
-    """모델 텍스트에서 JSON을 추출·파싱하여 추천 리스트로 변환한다."""
-    import json as _json
-
-    raw = (text or "").strip()
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        if raw[:4].lower() == "json":
-            raw = raw[4:]
-    start, end = raw.find("{"), raw.rfind("}")
-    if start < 0 or end < 0:
-        return None
-    try:
-        data = _json.loads(raw[start:end + 1])
-    except (ValueError, TypeError):
-        return None
-
-    by_id = {w["worker_id"]: w for w in candidates}
-    recs = []
-    for rec in data.get("recommendations", []):
+    by_id = {item["worker_id"]: item for item in candidates}
+    recommendations: list[dict[str, Any]] = []
+    for item in output.recommendations[:3]:
+        if item.total_cost != sum(member.offered_wage for member in item.members):
+            continue
         members = []
-        for m in rec.get("members", []):
-            w = by_id.get(m.get("worker_id"))
-            if not w:
+        for member in item.members:
+            worker = by_id.get(member.worker_id)
+            if worker is None:
                 members = []
                 break
-            try:
-                wage = int(m.get("offered_wage") or w.get("desired_daily_wage", 0))
-            except (ValueError, TypeError):
-                wage = int(w.get("desired_daily_wage", 0))
-            members.append(_member(w, m.get("assigned_trade"), wage))
-        if not members:
-            continue
-        recs.append(_rec(len(recs) + 1, members,
-                         rec.get("reason", ""), list(rec.get("considerations") or [])))
-    return recs or None
+            members.append(_member(
+                worker,
+                member.assigned_trade,
+                member.offered_wage,
+            ))
+        if members:
+            reason = _humanize_agent_text(item.reason, by_id, expected_request_id)
+            considerations = [
+                _humanize_agent_text(value, by_id, expected_request_id)
+                for value in item.considerations
+            ]
+            recommendations.append(_rec(
+                len(recommendations) + 1,
+                members,
+                reason,
+                considerations,
+            ))
+    return recommendations or None
+
+
+_HUMAN_TRADE_LABELS = {
+    "FORMWORK": "형틀목공",
+    "REBAR": "철근공",
+    "MASONRY": "조적공",
+    "MATERIAL_CARRY": "자재운반",
+    "GENERAL": "보통인부",
+    "ANY": "직종 무관",
+}
+
+
+def _humanize_agent_text(
+    value: str,
+    candidates_by_id: dict[str, dict[str, Any]],
+    request_id: str,
+) -> str:
+    """Agent 설명에서 허용된 식별자와 내부 코드값을 사용자용 표현으로 바꾼다."""
+    text = str(value or "")
+    for worker_id in sorted(candidates_by_id, key=len, reverse=True):
+        worker = candidates_by_id[worker_id]
+        label = f"{worker.get('name')} 근로자" if worker.get("name") else "선택 근로자"
+        text = text.replace(worker_id, label)
+    if request_id:
+        text = text.replace(request_id, "현재 작업 요청")
+    for code, label in _HUMAN_TRADE_LABELS.items():
+        text = re.sub(rf"(?<![A-Za-z0-9_]){code}(?![A-Za-z0-9_])", label, text)
+    field_labels = {
+        "candidate_worker_ids": "후보 근로자",
+        "worker_id": "근로자",
+        "member_id": "근로자",
+        "request_id": "작업 요청",
+        "crew_id": "작업조",
+    }
+    for field, label in field_labels.items():
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_]){field}(?![A-Za-z0-9_])",
+            label,
+            text,
+            flags=re.IGNORECASE,
+        )
+    text = re.sub(r"\b(?:REQ|CREW|WORKER|W)_[A-Za-z0-9_-]+\b", "식별 정보", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
+        "식별 정보",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(text.split())
+
+
+def _try_strands(
+    candidates,
+    needed_trades,
+    budget,
+    *,
+    mode="NORMAL",
+    fixed_members=None,
+    priority=None,
+    request=None,
+    crew_id=None,
+):
+    """Run the actual Strands Crew Composition Agent; return None for safe fallback."""
+    if not os.environ.get("CREW_AGENT_MODEL_ID"):
+        return None
+    try:
+        agent_input = _build_agent_input(
+            candidates,
+            needed_trades,
+            budget,
+            mode=mode,
+            fixed_members=fixed_members,
+            priority=priority,
+            request=request,
+            crew_id=crew_id,
+        )
+        logger.info(
+            "crew_strands_invoke request_id=%s mode=%s candidates=%d required_workers=%d",
+            agent_input.request.request_id,
+            mode,
+            len(agent_input.candidate_worker_ids),
+            sum(item.count for item in agent_input.request.required_workers),
+        )
+        output = compose_crew(
+            agent_input,
+            timeout_s=float(os.environ.get("AGENT_INVOKE_TIMEOUT_S", "45")),
+        )
+        recommendations = _agent_output_recommendations(
+            output,
+            candidates,
+            expected_mode=mode,
+            expected_request_id=agent_input.request.request_id,
+        )
+        if recommendations:
+            logger.info(
+                "crew_strands_success request_id=%s mode=%s recommendations=%d",
+                agent_input.request.request_id,
+                mode,
+                len(recommendations),
+            )
+        else:
+            logger.warning(
+                "crew_strands_invalid_output request_id=%s mode=%s",
+                agent_input.request.request_id,
+                mode,
+            )
+        return recommendations
+    except (BedrockUnavailable, ValidationError, ValueError) as exc:
+        logger.warning("crew_strands_failed reason=%s", type(exc).__name__)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +612,8 @@ def _valid_rec(rec, candidates, needed_trades, budget) -> bool:
         if not w or w.get("state") != WorkerState.READY:
             return False
         if m["assigned_trade"] in (w.get("excluded_trades") or []):
+            return False
+        if int(m["offered_wage"]) != int(w.get("desired_daily_wage", 0)):
             return False
         got[m["assigned_trade"]] += 1
         total += int(m["offered_wage"])
@@ -582,13 +760,20 @@ def _cancel_existing_crews(request_id: str):
         )
 
 
-def _set_request_status(request_id, status):
+def _set_request_status(request_id, status, *, composition_error: str | None = None):
     now = now_iso()
+    expression = "SET #s = :s, gsi1sk = :g, updated_at = :t"
+    values = {":s": status, ":g": db.request_gsi1sk(status, request_id), ":t": now}
+    if composition_error:
+        expression += ", composition_error = :error"
+        values[":error"] = composition_error
+    else:
+        expression += " REMOVE composition_error"
     db.update_request(
         request_id,
-        UpdateExpression="SET #s = :s, gsi1sk = :g, updated_at = :t",
+        UpdateExpression=expression,
         ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":s": status, ":g": db.request_gsi1sk(status, request_id), ":t": now},
+        ExpressionAttributeValues=values,
     )
 
 
@@ -607,5 +792,105 @@ def _to_decimal(value):
     return to_decimal(value)
 
 
+def _invoke_self(event: dict[str, Any], context: Any) -> None:
+    global _LAMBDA_CLIENT
+    if _LAMBDA_CLIENT is None:
+        import boto3
+
+        _LAMBDA_CLIENT = boto3.client("lambda")
+    function_name = getattr(context, "invoked_function_arn", None) or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+    if not function_name:
+        raise RuntimeError("Lambda function name is unavailable")
+    response = _LAMBDA_CLIENT.invoke(
+        FunctionName=function_name,
+        InvocationType="Event",
+        Payload=json.dumps(event, ensure_ascii=False).encode("utf-8"),
+    )
+    if int(response.get("StatusCode", 0)) != 202:
+        raise RuntimeError("asynchronous crew agent invocation was not accepted")
+
+
+def _start_async(event: dict[str, Any], context: Any) -> dict[str, Any]:
+    principal = get_principal(event)
+    principal.require_role(Role.OFFICE)
+    path = event.get("path") or ""
+    params = event.get("pathParameters") or {}
+    previous_status = ""
+    entity_id = ""
+    entity_type = ""
+
+    if path.endswith("/agent-compose"):
+        request_id = params.get("requestId") or path.rstrip("/").split("/")[-2]
+        request = db.get_request(request_id)
+        if not request:
+            raise ApiError(ErrorCode.REQUEST_NOT_FOUND, "요청을 찾을 수 없습니다.")
+        principal.require_office(request["office_id"])
+        if request["status"] in (
+            RequestStatus.RUNNING,
+            RequestStatus.COMPLETED,
+            RequestStatus.CANCELLED,
+            RequestStatus.REJECTED,
+        ):
+            raise ApiError(ErrorCode.STATE_CONFLICT, "종료되거나 작업 중인 요청은 AI 편성을 실행할 수 없습니다.")
+        previous_status = request["status"]
+        entity_id = request_id
+        entity_type = "REQUEST"
+        _set_request_status(request_id, RequestStatus.COMPOSING)
+    else:
+        event_id = params.get("eventId") or path.rstrip("/").split("/")[-2]
+        gap = db.get_gap_event(event_id)
+        if not gap:
+            raise ApiError(ErrorCode.GAP_EVENT_NOT_FOUND, "결원 이벤트를 찾을 수 없습니다.")
+        principal.require_office(gap["office_id"])
+        previous_status = gap["status"]
+        entity_id = event_id
+        entity_type = "GAP"
+        _set_gap_status(event_id, GapStatus.RECOMPOSING)
+
+    async_event = dict(event)
+    async_event["headers"] = {
+        key: value for key, value in (event.get("headers") or {}).items()
+        if key.lower() != "authorization"
+    }
+    async_event["_crewAgentAction"] = "RUN"
+    async_event["_previousStatus"] = previous_status
+    async_event["_entityType"] = entity_type
+    async_event["_entityId"] = entity_id
+    try:
+        _invoke_self(async_event, context)
+    except Exception:
+        if entity_type == "REQUEST":
+            _set_request_status(entity_id, previous_status)
+        else:
+            _set_gap_status(entity_id, previous_status)
+        raise
+    return success({"status": "PROCESSING", "entityId": entity_id}, status_code=202)
+
+
 def lambda_handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
+    if event.get("_crewAgentAction") == "RUN":
+        response = router.dispatch(event)
+        if int(response.get("statusCode", 500)) >= 400:
+            if event.get("_entityType") == "REQUEST":
+                try:
+                    payload = json.loads(response.get("body") or "{}")
+                    error_message = str((payload.get("error") or {}).get("message") or "AI 편성 조건을 충족하는 조합을 찾지 못했습니다.")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    error_message = "AI 편성 조건을 충족하는 조합을 찾지 못했습니다."
+                _set_request_status(
+                    event["_entityId"],
+                    event.get("_previousStatus") or RequestStatus.REQUESTED,
+                    composition_error=error_message,
+                )
+            elif event.get("_entityType") == "GAP":
+                _set_gap_status(event["_entityId"], GapStatus.FAILED)
+        return response
+    if ASYNC_ENABLED:
+        try:
+            return _start_async(event, _context)
+        except ApiError as exc:
+            return exc.to_response()
+        except Exception:
+            logger.exception("crew_agent_async_start_failed")
+            return ApiError(ErrorCode.INTERNAL_ERROR, "AI 편성 작업을 시작하지 못했습니다.").to_response()
     return router.dispatch(event)

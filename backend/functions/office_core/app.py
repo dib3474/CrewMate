@@ -2,6 +2,7 @@
 
 Route:
   GET  /office/workers                          소속 근로자 조회 (필터)
+  GET  /office/workers/{workerId}               소속 근로자 지원서 상세
   GET  /office/requests                         요청 목록 (GSI1, 토큰 office_id 기준)
   GET  /office/requests/{requestId}             요청 상세 (+작업조)
   POST /office/requests/{requestId}/reject      요청 거절 (+COMPANY 알림)
@@ -23,6 +24,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from shared import db, txn
+from shared.cancellation import CancellationConflict, cancel_request_before_start
 from shared.auth import Principal
 from shared.crew import (
     assemble_crew_members,
@@ -57,6 +59,7 @@ from shared.state import (
     GapType,
     RequestStatus,
     Role,
+    Trade,
     WorkerState,
 )
 from shared.routing import Router
@@ -87,6 +90,33 @@ def list_workers(event, principal: Principal, _params):
     return success([worker_office_view(w) for w in workers])
 
 
+@router.route("GET", "/office/workers/{workerId}")
+def get_worker_detail(_event, principal: Principal, params):
+    """지원서 원문과 완료 작업 이력을 소속 사무소에만 제공한다."""
+    principal.require_role(Role.OFFICE)
+    worker = db.get_worker(params["workerId"])
+    if not worker:
+        raise ApiError(ErrorCode.WORKER_NOT_FOUND, "근로자를 찾을 수 없습니다.")
+    principal.require_office(worker["office_id"])
+
+    history = []
+    for assignment in db.query_worker_assignments(worker["worker_id"], limit=200):
+        if assignment.get("status") != AssignmentStatus.COMPLETED:
+            continue
+        crew = db.get_crew(assignment["crew_id"])
+        request = db.get_request(crew["request_id"]) if crew else None
+        history.append({
+            "crew_id": assignment.get("crew_id"),
+            "request_id": (request or {}).get("request_id"),
+            "site_name": (request or {}).get("site_name"),
+            "work_date": (request or {}).get("work_date"),
+            "assigned_trade": assignment.get("assigned_trade"),
+            "offered_wage": assignment.get("offered_wage"),
+            "completed_at": assignment.get("updated_at") or assignment.get("created_at"),
+        })
+    return success(worker_office_view(worker, work_history=history))
+
+
 def _apply_filters(workers, qp):
     trade = qp.get("trade")
     region = qp.get("region")
@@ -97,7 +127,9 @@ def _apply_filters(workers, qp):
         validate_trade(trade)
     result = []
     for w in workers:
-        if trade and trade not in (w.get("preferred_trades") or []):
+        if trade == Trade.GENERAL and trade in (w.get("excluded_trades") or []):
+            continue
+        if trade and trade != Trade.GENERAL and trade not in (w.get("preferred_trades") or []):
             continue
         if region and w.get("region") != region:
             continue
@@ -166,27 +198,35 @@ def reject_request(event, principal: Principal, params):
     if not req:
         raise ApiError(ErrorCode.REQUEST_NOT_FOUND, "요청을 찾을 수 없습니다.")
     principal.require_office(req["office_id"])
-    if req["status"] != RequestStatus.REQUESTED:
-        raise ApiError(ErrorCode.STATE_CONFLICT, "이미 처리된 요청입니다.")
+    if req["status"] not in (
+        RequestStatus.REQUESTED,
+        RequestStatus.COMPOSING,
+        RequestStatus.PROPOSED,
+        RequestStatus.APPROVED,
+    ):
+        raise ApiError(ErrorCode.STATE_CONFLICT, "작업 시작 전 요청만 거절할 수 있습니다.")
     body = parse_body(event)
     reason = body.get("reason") or ""
-    now = now_iso()
-    resp = db.update_request(
-        req["request_id"],
-        UpdateExpression="SET #s = :s, gsi1sk = :g, rejection_reason = :r, updated_at = :t",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={
-            ":s": RequestStatus.REJECTED,
-            ":g": db.request_gsi1sk(RequestStatus.REJECTED, req["request_id"]),
-            ":r": reason,
-            ":t": now,
-        },
-        ReturnValues="ALL_NEW",
-    )
+    try:
+        result = cancel_request_before_start(
+            req,
+            final_status=RequestStatus.REJECTED,
+            reason_field="rejection_reason",
+            reason=reason,
+        )
+    except CancellationConflict as exc:
+        raise ApiError(ErrorCode.STATE_CONFLICT, str(exc))
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("TransactionCanceledException", "ConditionalCheckFailedException"):
+            raise ApiError(ErrorCode.STATE_CONFLICT, "요청 상태가 변경되어 거절할 수 없습니다.")
+        raise
+    for worker in result.restored_workers:
+        _notify(worker.get("user_id"), "COMPOSITION_CANCELLED", "편성 종료",
+                f"{req.get('site_name', '현장')} 작업조 편성이 종료되었습니다.")
     company = db.get_company(req["company_id"]) or {}
     _notify(company.get("owner_user_id") or req["company_id"], "REQUEST_REJECTED", "요청 거절",
             f"'{req.get('site_name')}' 요청이 거절되었습니다. 사유: {reason}")
-    return success(request_view(resp["Attributes"]))
+    return success(request_view(db.get_request(req["request_id"])))
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +415,7 @@ def cancel_composition(_event, principal: Principal, params):
                 a["worker_id"], now=now, to_state=WorkerState.READY,
                 from_states=[WorkerState.NOTIFIED, WorkerState.RESERVED],
                 current_offer=None, current_crew_id=None,
+                dec_dispatched=worker.get("state") == WorkerState.RESERVED,
             ))
             entries.append(txn.assignment_update_entry(
                 crew_id, a["worker_id"], now=now,

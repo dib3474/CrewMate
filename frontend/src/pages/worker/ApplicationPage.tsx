@@ -29,9 +29,11 @@ export default function ApplicationPage() {
     region: '',
     desired_daily_wage: 150000,
     certifications: [],
+    abilities: [],
     introduction: '',
   });
   const [certInput, setCertInput] = useState('');
+  const [abilityInput, setAbilityInput] = useState('');
   const [wageStat, setWageStat] = useState<WageStats | null>(null);
 
   // 경력 연차별 평균 희망 일당 안내 (직종 무관)
@@ -74,6 +76,8 @@ export default function ApplicationPage() {
           region: w.region,
           desired_daily_wage: w.desired_daily_wage,
           certifications: w.certifications,
+          abilities: w.abilities || [],
+          introduction: w.introduction || '',
         });
       } else {
         // 신규 작성: 기본값으로 첫 활성 사무소 선택
@@ -132,6 +136,18 @@ export default function ApplicationPage() {
 
   const removeCertification = (cert: string) => {
     setForm({ ...form, certifications: form.certifications.filter((c) => c !== cert) });
+  };
+
+  const addAbility = () => {
+    const ability = abilityInput.trim();
+    if (ability && !(form.abilities || []).includes(ability)) {
+      setForm({ ...form, abilities: [...(form.abilities || []), ability] });
+      setAbilityInput('');
+    }
+  };
+
+  const removeAbility = (ability: string) => {
+    setForm({ ...form, abilities: (form.abilities || []).filter((item) => item !== ability) });
   };
 
   return (
@@ -271,6 +287,31 @@ export default function ApplicationPage() {
                 <span key={cert} className="inline-flex items-center gap-1 bg-green-50 text-green-700 text-xs px-2 py-1 rounded-full">
                   {cert}
                   <button type="button" onClick={() => removeCertification(cert)} className="text-green-500 hover:text-green-800">×</button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 자기소개 */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">보유 작업 능력</label>
+          <p className="text-xs text-gray-400 mb-2">보고서의 NCS 능력 매칭에 사용됩니다.</p>
+          <div className="flex gap-2">
+            <input type="text" value={abilityInput}
+              onChange={(e) => setAbilityInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addAbility(); } }}
+              className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500"
+              placeholder="예: 거푸집 설치" />
+            <button type="button" onClick={addAbility}
+              className="px-3 py-2 bg-gray-100 text-gray-700 rounded-md text-sm hover:bg-gray-200">추가</button>
+          </div>
+          {(form.abilities || []).length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-2">
+              {(form.abilities || []).map((ability) => (
+                <span key={ability} className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 text-xs px-2 py-1 rounded-full">
+                  {ability}
+                  <button type="button" onClick={() => removeAbility(ability)} className="text-blue-500 hover:text-blue-800">×</button>
                 </span>
               ))}
             </div>

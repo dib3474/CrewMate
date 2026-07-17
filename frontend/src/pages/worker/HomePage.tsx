@@ -4,7 +4,8 @@ import toast from 'react-hot-toast';
 import { api } from '../../api/client';
 import { usePolling } from '../../hooks/usePolling';
 import { useAuth } from '../../auth/AuthContext';
-import type { Worker, WorkerState } from '../../api/types';
+import AttendanceHeatmap from '../../components/AttendanceHeatmap';
+import type { AttendanceMap, Worker, WorkerState } from '../../api/types';
 
 const STATE_CONFIG: Record<WorkerState, { label: string; color: string; bgColor: string }> = {
   INACTIVE: { label: '비활성', color: 'text-gray-700', bgColor: 'bg-gray-100' },
@@ -34,9 +35,18 @@ export default function WorkerHomePage() {
     return null;
   }, []);
 
-  const { data: worker, refetch } = usePolling<Worker | null>({
+  const { data: worker, loading: workerLoading, refetch } = usePolling<Worker | null>({
     fetchFn: fetchWorker,
     interval: 5000,
+  });
+
+  const fetchAttendance = useCallback(async () => {
+    const res = await api.get<AttendanceMap>('/worker/attendance');
+    return res.success ? res.data : {};
+  }, []);
+  const { data: attendance } = usePolling<AttendanceMap>({
+    fetchFn: fetchAttendance,
+    interval: 60000,
   });
 
   useEffect(() => {
@@ -85,6 +95,17 @@ export default function WorkerHomePage() {
     else toast.error(res.error.message);
   };
 
+  if (workerLoading && !worker) {
+    return (
+      <div className="max-w-lg mx-auto">
+        <h2 className="text-xl font-semibold text-gray-800 mb-4">근로자 대시보드</h2>
+        <div className="bg-white rounded-lg border border-gray-200 p-6 text-center text-gray-400">
+          지원서와 작업 실적을 불러오는 중...
+        </div>
+      </div>
+    );
+  }
+
   if (!worker) {
     return (
       <div className="max-w-lg mx-auto">
@@ -106,10 +127,16 @@ export default function WorkerHomePage() {
     <div className="max-w-lg mx-auto space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold text-gray-800">근로자 대시보드</h2>
-        <button onClick={() => navigate('/worker/application')}
-          className="text-sm text-gray-500 hover:text-gray-800 transition-colors">
-          지원서 수정
-        </button>
+        <div className="flex items-center gap-3">
+          <button onClick={() => navigate('/worker/report')}
+            className="text-sm font-medium text-green-700 border border-green-200 bg-green-50 px-3 py-1.5 rounded-md hover:bg-green-100 transition-colors">
+            스펙 보고서 보기
+          </button>
+          <button onClick={() => navigate('/worker/application')}
+            className="text-sm font-medium text-green-700 border border-green-200 bg-green-50 px-3 py-1.5 rounded-md hover:bg-green-100 transition-colors">
+            지원서 수정
+          </button>
+        </div>
       </div>
 
       {/* 상태 카드 */}
@@ -142,10 +169,16 @@ export default function WorkerHomePage() {
             return (
               <div className="flex flex-col items-center gap-2">
                 <p className="text-sm text-blue-600">배차 완료! 작업 시간에 현장으로 출근해주세요.</p>
-                <button onClick={handleCancelReservation} disabled={actionLoading || !canCancel}
-                  className="bg-white border border-red-300 text-red-600 px-5 py-2 rounded-md text-sm font-medium hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
-                  {actionLoading ? '처리 중...' : '배차 취소'}
-                </button>
+                <div className="flex gap-2">
+                  <button onClick={() => navigate('/worker/assignments')}
+                    className="bg-blue-600 text-white px-5 py-2 rounded-md text-sm font-medium hover:bg-blue-700 transition-colors">
+                    작업 정보 보기
+                  </button>
+                  <button onClick={handleCancelReservation} disabled={actionLoading || !canCancel}
+                    className="bg-white border border-red-300 text-red-600 px-5 py-2 rounded-md text-sm font-medium hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                    {actionLoading ? '처리 중...' : '배차 취소'}
+                  </button>
+                </div>
                 {!canCancel && (
                   <p className="text-xs text-gray-400">작업 시작 24시간 이전에만 취소할 수 있습니다.</p>
                 )}
@@ -278,13 +311,7 @@ export default function WorkerHomePage() {
           <button onClick={() => navigate('/worker/history')}
             className="text-xs text-green-600 hover:underline">이력 보기 →</button>
         </div>
-        <div className="grid grid-cols-4 gap-2 text-center">
-          <div>
-            <p className="text-2xl font-bold text-yellow-500">
-              {worker.rating != null ? `★${worker.rating}` : '-'}
-            </p>
-            <p className="text-xs text-gray-500">평점</p>
-          </div>
+        <div className="grid grid-cols-3 gap-2 text-center">
           <div>
             <p className="text-2xl font-bold text-gray-800">{worker.attended_count ?? 0}</p>
             <p className="text-xs text-gray-500">출근</p>
@@ -299,6 +326,10 @@ export default function WorkerHomePage() {
           </div>
         </div>
         <p className="text-[11px] text-gray-400 mt-2 text-center">배차완료는 작업 24시간 이전에 취소한 건은 제외됩니다.</p>
+        <div className="mt-5 pt-4 border-t border-gray-100">
+          <p className="text-xs font-medium text-gray-500 mb-3">근무한 날짜</p>
+          <AttendanceHeatmap attendance={attendance || {}} />
+        </div>
       </div>
     </div>
   );

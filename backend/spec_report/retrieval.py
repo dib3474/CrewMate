@@ -62,9 +62,14 @@ class BedrockKnowledgeBaseRetriever:
         client: Any | None = None,
     ):
         self.knowledge_base_id = knowledge_base_id or os.environ.get("KNOWLEDGE_BASE_ID", "")
-        self.region_name = region_name or os.environ.get("REPORT_MODEL_REGION") or os.environ.get("AWS_REGION") or "ap-northeast-2"
+        self.region_name = (
+            region_name
+            or os.environ.get("KNOWLEDGE_BASE_REGION")
+            or os.environ.get("AWS_REGION")
+            or "ap-northeast-2"
+        )
         self.number_of_results = number_of_results or int(os.environ.get("KB_NUMBER_OF_RESULTS", "5"))
-        self.review_status = review_status or os.environ.get("KB_REVIEW_STATUS", "검토완료")
+        self.review_status = review_status or os.environ.get("KB_REVIEW_STATUS", "구조화원본")
         if client is None and self.knowledge_base_id:
             import boto3
 

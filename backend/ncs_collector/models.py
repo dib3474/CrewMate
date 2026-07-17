@@ -180,6 +180,29 @@ class ItemEvidence(StrictModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class AgentItemEvidenceDraft(StrictModel):
+    """Narrative-only KB evidence fields that the LLM is allowed to author."""
+
+    item_name: str
+    item_type: str
+    importance: str | None = None
+    reason: str
+    local_document_ids: list[str] = Field(default_factory=list)
+    ncs_codes: list[str] = Field(default_factory=list)
+    confidence: Confidence
+    conflicts: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class AgentReportDraft(StrictModel):
+    """Short LLM-authored overlay; authoritative and source fields are Lambda-owned."""
+
+    knowledge_base_evidence: list[AgentItemEvidenceDraft] = Field(default_factory=list)
+    conflicts: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    human_review_items: list[str] = Field(default_factory=list)
+
+
 class Citation(StrictModel):
     item_name: str
     source_type: str

@@ -90,12 +90,18 @@ class TradeRequirement(_StrictModel):
 
 
 class RequestSpec(_StrictModel):
-    """The work request conditions the Agent composes against."""
+    """The slots and available budget for this composition run.
+
+    In NORMAL mode these are the full request requirements and budget. In
+    EMERGENCY mode Lambda supplies only the remaining gaps and remaining budget.
+    """
 
     request_id: str
+    office_id: str
+    crew_id: str | None = None
     required_workers: list[TradeRequirement]
-    budget: int = Field(gt=0)
-    priority: Priority
+    budget: int = Field(ge=0)  # 0 means no explicit budget cap
+    priority: Priority | None = None
     site: str
     work_date: str  # ISO8601 date
     start_time: str
@@ -129,17 +135,28 @@ class CollaborationPair(_StrictModel):
 
 
 class AgentInput(_StrictModel):
-    """The full Agent input payload for a single compose run.
+    """Tool-oriented input for a single compose run.
 
-    ``fixed_members`` is populated only in EMERGENCY mode; ``collaboration_pairs``
-    defaults to empty when no shared history is available.
+    Lambda provides identifiers, constraints, and a closed-world candidate allowlist.
+    Candidate details and collaboration history are deliberately omitted so the Agent
+    decides which read-only tools to call. ``fixed_members`` is populated only in
+    EMERGENCY mode.
     """
 
     mode: Literal["NORMAL", "EMERGENCY"]
     request: RequestSpec
     fixed_members: list[FixedMember] = []  # EMERGENCY 에서만 채워짐
-    candidates: list[Candidate]
-    collaboration_pairs: list[CollaborationPair] = []
+    candidate_worker_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _mode_and_scope_are_consistent(self) -> "AgentInput":
+        if len(set(self.candidate_worker_ids)) != len(self.candidate_worker_ids):
+            raise ValueError("candidate_worker_ids must not contain duplicates")
+        if self.mode == "NORMAL" and self.fixed_members:
+            raise ValueError("fixed_members must be empty in NORMAL mode")
+        if self.mode == "EMERGENCY" and not self.request.crew_id:
+            raise ValueError("request.crew_id is required in EMERGENCY mode")
+        return self
 
 
 # --------------------------------------------------------------------------- #

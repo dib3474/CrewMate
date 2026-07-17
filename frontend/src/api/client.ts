@@ -32,7 +32,8 @@ export function getAuthToken(): string | null {
 export async function apiRequest<T>(
   method: 'GET' | 'POST' | 'PUT' | 'DELETE',
   path: string,
-  body?: unknown
+  body?: unknown,
+  timeoutMs = 15000,
 ): Promise<ApiResponse<T>> {
   if (API_MODE === 'mock') {
     const handlers = await getMockHandlers();
@@ -67,7 +68,7 @@ export async function apiRequest<T>(
 
   // 15초 타임아웃 (무한 대기 방지)
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(`${API_URL}${path}`, {
@@ -131,7 +132,7 @@ function matchPattern(pattern: string, actual: string): { param?: string } | nul
 // 편의 함수
 export const api = {
   get: <T>(path: string) => apiRequest<T>('GET', path),
-  post: <T>(path: string, body?: unknown) => apiRequest<T>('POST', path, body),
+  post: <T>(path: string, body?: unknown, timeoutMs?: number) => apiRequest<T>('POST', path, body, timeoutMs),
   put: <T>(path: string, body?: unknown) => apiRequest<T>('PUT', path, body),
   delete: <T>(path: string) => apiRequest<T>('DELETE', path),
 };

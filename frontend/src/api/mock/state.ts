@@ -7,6 +7,7 @@ import type {
   Notification,
   Office,
 } from '../types';
+import { loadAuthSession } from '../../auth/session';
 
 // 시드 인력사무소 목록 (GET /offices 로 제공)
 export const SEED_OFFICES: Office[] = [
@@ -112,11 +113,19 @@ const SEED_WORKERS: Worker[] = [
     region: '부산 해운대구',
     desired_daily_wage: 180000,
     certifications: ['건설기능사', '안전교육이수'],
+    abilities: ['거푸집 설치', '시공 전 준비'],
+    introduction: '안전수칙을 지키며 형틀과 조적 작업을 해왔습니다.',
     completed_count: 42,
+    attended_count: 3,
+    dispatched_count: 3,
     no_show_count: 0,
     current_crew_id: null,
     current_offer: null,
-    work_history: [],
+    work_history: [
+      { crew_id: 'CREW_H01', request_id: 'REQ_H01', site_name: '해운대 주거현장', work_date: '2026-07-03', assigned_trade: 'FORMWORK', offered_wage: 180000, completed_at: '2026-07-03T17:00:00Z' },
+      { crew_id: 'CREW_H02', request_id: 'REQ_H02', site_name: '센텀 업무시설', work_date: '2026-07-08', assigned_trade: 'MASONRY', offered_wage: 180000, completed_at: '2026-07-08T17:00:00Z' },
+      { crew_id: 'CREW_H03', request_id: 'REQ_H03', site_name: '수영구 공동주택', work_date: '2026-07-14', assigned_trade: 'FORMWORK', offered_wage: 185000, completed_at: '2026-07-14T17:00:00Z' },
+    ],
     state_changed_at: '2026-07-10T08:00:00Z',
     created_at: '2026-01-15T09:00:00Z',
     updated_at: '2026-07-10T08:00:00Z',
@@ -135,6 +144,8 @@ const SEED_WORKERS: Worker[] = [
     region: '부산 사하구',
     desired_daily_wage: 160000,
     certifications: ['건설기능사'],
+    abilities: ['철근가공 조립검사'],
+    introduction: '철근 작업을 중심으로 현장 경험을 쌓았습니다.',
     completed_count: 28,
     no_show_count: 1,
     current_crew_id: null,
@@ -158,6 +169,8 @@ const SEED_WORKERS: Worker[] = [
     region: '부산 동래구',
     desired_daily_wage: 150000,
     certifications: ['안전교육이수'],
+    abilities: ['조적미장시공 작업준비', '벽돌 쌓기 작업'],
+    introduction: '조적과 일반 현장 업무가 가능합니다.',
     completed_count: 56,
     no_show_count: 0,
     current_crew_id: null,
@@ -264,5 +277,5 @@ export function setCurrentUserId(id: string | null) {
   currentUserId = id;
 }
 export function getCurrentUserId(): string | null {
-  return currentUserId;
+  return currentUserId || loadAuthSession()?.userId || null;
 }

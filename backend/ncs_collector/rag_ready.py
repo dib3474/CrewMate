@@ -51,7 +51,10 @@ def _write_record_csv(path: Path, rows: Iterable[dict[str, Any]], source_file: s
         },
     }
     path.with_name(path.name + ".metadata.json").write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+        # S3 Vectors-backed Bedrock KB ingestion rejects sidecars larger than
+        # 1 KiB. Compact JSON keeps this record schema below that service limit.
+        json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
     )
 
 
@@ -87,7 +90,7 @@ def build_rag_ready(source_root: str | Path, output_root: str | Path) -> dict[st
             "importance": row["중요도"],
             "selection_rule": row["선택규칙"],
             "certification_name": row["자격증명"],
-            "review_status": "원본 상태 미표기",
+            "review_status": "구조화원본",
             "source_file": "직종별_자격요건.csv",
         })
     cert_path = kb_dir / "certification-requirements.csv"
@@ -104,7 +107,7 @@ def build_rag_ready(source_root: str | Path, output_root: str | Path) -> dict[st
             "document_type": "NCS 능력 요구사항",
             "trade": row["직종"],
             "ncs_code": row["NCS코드"],
-            "review_status": "원본 상태 미표기",
+            "review_status": "구조화원본",
             "source_file": "직종별_능력요건.csv",
         })
     ability_path = kb_dir / "ability-requirements.csv"

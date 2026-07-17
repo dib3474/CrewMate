@@ -130,6 +130,8 @@ def build_worker(
     region: str,
     desired_daily_wage: int,
     certifications: list[str] | None = None,
+    abilities: list[str] | None = None,
+    introduction: str = "",
     worker_id: str | None = None,
     state: str = WorkerState.INACTIVE,
     completed_count: int = 0,
@@ -155,6 +157,8 @@ def build_worker(
         "region": region,
         "desired_daily_wage": desired_daily_wage,
         "certifications": certifications or [],
+        "abilities": abilities or [],
+        "introduction": introduction,
         "completed_count": completed_count,
         "dispatched_count": dispatched_count,   # 배차완료(수락 확정) 수
         "attended_count": attended_count,       # 출근(체크인) 수
@@ -190,8 +194,8 @@ def worker_office_view(worker: dict[str, Any], work_history: list | None = None)
 
 
 def worker_self_view(worker: dict[str, Any], work_history: list | None = None) -> dict[str, Any]:
-    """WORKER 본인 응답용: 평점·출근 수·완료 수를 노출하고 내부 배차 분모는 숨긴다."""
-    hidden = _WORKER_INTERNAL_KEYS | {"dispatched_count"}
+    """WORKER 본인 응답용: 작업 실적 카운트와 평점을 노출하고 내부 누적값만 숨긴다."""
+    hidden = _WORKER_INTERNAL_KEYS
     view = {k: clean(v) for k, v in worker.items() if k not in hidden}
     view["rating"] = rating_average(worker)
     view["work_history"] = clean(work_history or [])
@@ -530,6 +534,11 @@ def work_history_entry(assignment: dict[str, Any], request: dict[str, Any] | Non
         "request_id": req.get("request_id"),
         "site_name": req.get("site_name"),
         "work_date": req.get("work_date"),
+        "start_time": req.get("start_time"),
+        "location_text": req.get("location_text"),
+        "company_name": req.get("company_name"),
+        "required_workers": clean(req.get("required_workers") or []),
+        "notes": req.get("notes") or "",
         "assigned_trade": assignment.get("assigned_trade"),
         "offered_wage": clean(assignment.get("offered_wage")),
         "completed_at": assignment.get("updated_at") or assignment.get("created_at"),

@@ -5,6 +5,7 @@ Route:
   PUT  /company/requests/{requestId}              요청 수정
   GET  /company/requests                          내 요청 목록 (GSI2)
   GET  /company/requests/{requestId}              요청 상세 (+ 확정 작업조 + activeGap)
+  POST /company/requests/{requestId}/cancel       작업 시작 전 요청 취소
   POST /company/crews/{crewId}/checkin/{workerId}   출근 처리 (트랜잭션 4)
   POST /company/crews/{crewId}/checkout/{workerId}  퇴근 처리 (트랜잭션 5)
   POST /company/crews/{crewId}/gap-events            결원 등록 (트랜잭션 6)
@@ -21,6 +22,7 @@ from typing import Any
 from botocore.exceptions import ClientError
 
 from shared import db, txn
+from shared.cancellation import CancellationConflict, cancel_request_before_start
 from shared.auth import Principal
 from shared.crew import assemble_crew_members
 from shared.responses import ApiError, ErrorCode, success
@@ -161,6 +163,35 @@ def get_request(_event, principal: Principal, params):
     return success(result)
 
 
+@router.route("POST", "/company/requests/{requestId}/cancel")
+def cancel_request(event, principal: Principal, params):
+    principal.require_role(Role.COMPANY)
+    req = _load_own_request(principal, params["requestId"])
+    body = parse_body(event)
+    reason = body.get("reason") or "건설사 요청 취소"
+    try:
+        result = cancel_request_before_start(
+            req,
+            final_status=RequestStatus.CANCELLED,
+            reason_field="cancellation_reason",
+            reason=reason,
+        )
+    except CancellationConflict as exc:
+        raise ApiError(ErrorCode.STATE_CONFLICT, str(exc))
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] in ("TransactionCanceledException", "ConditionalCheckFailedException"):
+            raise ApiError(ErrorCode.STATE_CONFLICT, "요청 상태가 변경되어 취소할 수 없습니다.")
+        raise
+
+    for worker in result.restored_workers:
+        _notify(worker.get("user_id"), "REQUEST_CANCELLED", "작업 요청 취소",
+                f"'{req.get('site_name', '현장')}' 작업 요청이 취소되었습니다.")
+    office = db.get_office(req["office_id"]) or {}
+    _notify(office.get("owner_user_id") or req["office_id"], "REQUEST_CANCELLED", "작업 요청 취소",
+            f"건설사가 '{req.get('site_name')}' 요청을 취소했습니다. 사유: {reason}")
+    return success(request_view(db.get_request(req["request_id"])))
+
+
 def _active_crew_view(request_id: str):
     crews = [c for c in db.query_crews_by_request(request_id) if c.get("status") != CrewStatus.CANCELLED]
     if not crews:
@@ -227,36 +258,18 @@ def checkout(event, principal: Principal, params):
     if worker["state"] != WorkerState.RUNNING:
         raise ApiError(ErrorCode.STATE_CONFLICT, "퇴근 처리는 작업중(RUNNING) 상태에서만 가능합니다.")
 
-    # 퇴근 시 별점(1~5) 평가. 미제공 시 평점 집계 없이 퇴근만 처리.
-    body = parse_body(event)
-    rating = _parse_rating(body.get("rating"))
-
     now = now_iso()
     entries = [
         txn.worker_entry(
             worker_id, now=now, to_state=WorkerState.INACTIVE,
             current_offer=None, current_crew_id=None,
-            inc_completed=True, add_rating=rating,
+            inc_completed=True,
         ),
         txn.assignment_update_entry(crew_id, worker_id, now=now, status=AssignmentStatus.COMPLETED),
     ]
     _run(entries, "퇴근")
     _rollup_completed(crew)
     return success(_worker_company_response(worker_id))
-
-
-def _parse_rating(value: Any) -> int | None:
-    """퇴근 시 별점 검증 (1~5 정수). None/미제공이면 집계 안 함."""
-    if value in (None, ""):
-        return None
-    try:
-        rating = int(value)
-    except (ValueError, TypeError):
-        raise ApiError(ErrorCode.VALIDATION_ERROR, "평점은 1~5 정수여야 합니다.")
-    if not 1 <= rating <= 5:
-        raise ApiError(ErrorCode.VALIDATION_ERROR, "평점은 1~5 정수여야 합니다.")
-    return rating
-
 
 # ---------------------------------------------------------------------------
 # 결원 등록 (트랜잭션 6)

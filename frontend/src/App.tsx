@@ -11,10 +11,12 @@ import WorkerHomePage from './pages/worker/HomePage';
 import WorkerApplicationPage from './pages/worker/ApplicationPage';
 import WorkerAssignmentsPage from './pages/worker/AssignmentsPage';
 import WorkerHistoryPage from './pages/worker/HistoryPage';
+import WorkerReportPage from './pages/worker/ReportPage';
 
 // Office pages
 import OfficeHomePage from './pages/office/HomePage';
 import OfficeWorkersPage from './pages/office/WorkersPage';
+import OfficeWorkerDetailPage from './pages/office/WorkerDetailPage';
 import OfficeRequestDetailPage from './pages/office/RequestDetailPage';
 import OfficeComposePage from './pages/office/ComposePage';
 import OfficeEmergencyPage from './pages/office/EmergencyPage';
@@ -26,7 +28,7 @@ import CompanyRequestDetailPage from './pages/company/RequestDetailPage';
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Toaster position="top-center" toastOptions={{ duration: 3000 }} />
       <AuthProvider>
         <Routes>
@@ -47,6 +49,7 @@ export default function App() {
             <Route path="application" element={<WorkerApplicationPage />} />
             <Route path="assignments" element={<WorkerAssignmentsPage />} />
             <Route path="history" element={<WorkerHistoryPage />} />
+            <Route path="report" element={<WorkerReportPage />} />
           </Route>
 
           {/* 인력사무소 */}
@@ -60,6 +63,7 @@ export default function App() {
           >
             <Route index element={<OfficeHomePage />} />
             <Route path="workers" element={<OfficeWorkersPage />} />
+            <Route path="workers/:workerId" element={<OfficeWorkerDetailPage />} />
             <Route path="requests/:requestId" element={<OfficeRequestDetailPage />} />
             <Route path="compose/:requestId" element={<OfficeComposePage />} />
             <Route path="emergency/:eventId" element={<OfficeEmergencyPage />} />

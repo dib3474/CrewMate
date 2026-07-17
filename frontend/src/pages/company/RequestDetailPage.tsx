@@ -13,9 +13,9 @@ const GAP_STEP_LABEL: Record<string, string> = {
 const STATUS_STEPS: WorkRequestStatus[] = ['REQUESTED', 'APPROVED', 'DISPATCHED', 'RUNNING', 'COMPLETED'];
 
 const STATUS_LABEL: Record<string, string> = {
-  REQUESTED: '요청됨', COMPOSING: '재편성 중', PROPOSED: '추천 완료',
+  REQUESTED: '요청됨', COMPOSING: '편성 중', PROPOSED: '추천 완료',
   APPROVED: '수락 대기', DISPATCHED: '배차 완료', RUNNING: '작업 중',
-  COMPLETED: '완료', CANCELLED: '취소',
+  COMPLETED: '완료', CANCELLED: '취소', REJECTED: '거절됨',
 };
 
 const TRADE_LABEL: Record<string, string> = {
@@ -46,6 +46,7 @@ export default function RequestDetailPage() {
   const { requestId } = useParams<{ requestId: string }>();
   const navigate = useNavigate();
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [cancellingRequest, setCancellingRequest] = useState(false);
 
   const fetchDetail = useCallback(async () => {
     if (!requestId) return null;
@@ -65,23 +66,12 @@ export default function RequestDetailPage() {
     refetch();
   };
 
-  // 퇴근 처리 시 별점(1~5) 평가 모달
-  const [checkoutTarget, setCheckoutTarget] = useState<{ workerId: string; workerName: string } | null>(null);
-  const [stars, setStars] = useState(5);
-
-  const handleCheckout = (workerId: string, workerName: string) => {
-    setStars(5);
-    setCheckoutTarget({ workerId, workerName });
-  };
-
-  const submitCheckout = async () => {
-    if (!checkoutTarget) return;
-    const { workerId } = checkoutTarget;
+  const handleCheckout = async (workerId: string, workerName: string) => {
+    if (!confirm(`${workerName}님을 퇴근 처리하시겠습니까?`)) return;
     setActionLoading(workerId + '_out');
-    const res = await api.post(`/company/crews/${detail?.crew?.crew_id}/checkout/${workerId}`, { worker_id: workerId, rating: stars });
+    const res = await api.post(`/company/crews/${detail?.crew?.crew_id}/checkout/${workerId}`, { worker_id: workerId });
     setActionLoading(null);
-    setCheckoutTarget(null);
-    if (res.success) toast.success('퇴근 처리 완료. 평점이 반영되었습니다.');
+    if (res.success) toast.success('퇴근 처리가 완료되었습니다.');
     else toast.error(res.error.message);
     refetch();
   };
@@ -96,42 +86,40 @@ export default function RequestDetailPage() {
     refetch();
   };
 
+  const handleCancelRequest = async () => {
+    if (!confirm('이 작업 요청을 취소하시겠습니까?\n작업 시작 전 편성과 배정이 모두 종료됩니다.')) return;
+    setCancellingRequest(true);
+    const res = await api.post<WorkRequest>(`/company/requests/${requestId}/cancel`, {
+      reason: '건설사 요청 취소',
+    });
+    setCancellingRequest(false);
+    if (res.success) {
+      toast.success('작업 요청이 취소되었습니다.');
+      refetch();
+    } else {
+      toast.error(res.error.message);
+    }
+  };
+
   if (!detail) return <p className="text-center text-gray-400 py-10">불러오는 중...</p>;
 
   const currentStepIdx = STATUS_STEPS.indexOf(detail.status);
   const showAttendance = detail.status === 'DISPATCHED' || detail.status === 'RUNNING';
+  const canCancelRequest = !['RUNNING', 'COMPLETED', 'CANCELLED', 'REJECTED'].includes(detail.status);
 
   return (
-    <div className="max-w-2xl mx-auto space-y-5">
-      {/* 퇴근 별점 평가 모달 */}
-      {checkoutTarget && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={() => setCheckoutTarget(null)}>
-          <div className="bg-white rounded-lg p-6 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-800 mb-1">{checkoutTarget.workerName}님 퇴근 처리</h3>
-            <p className="text-sm text-gray-500 mb-4">오늘 작업에 대한 평점을 남겨주세요. (퇴근 후 되돌릴 수 없습니다)</p>
-            <div className="flex justify-center gap-1 mb-5">
-              {[1, 2, 3, 4, 5].map((s) => (
-                <button key={s} type="button" onClick={() => setStars(s)}
-                  className={`text-3xl transition-transform hover:scale-110 ${s <= stars ? 'text-yellow-400' : 'text-gray-300'}`}
-                  aria-label={`${s}점`}>★</button>
-              ))}
-            </div>
-            <p className="text-center text-sm text-gray-600 mb-4">{stars}점</p>
-            <div className="flex gap-2">
-              <button type="button" onClick={submitCheckout}
-                disabled={actionLoading === checkoutTarget.workerId + '_out'}
-                className="flex-1 bg-orange-600 text-white py-2.5 rounded-md text-sm font-medium hover:bg-orange-700 disabled:opacity-50">
-                {actionLoading === checkoutTarget.workerId + '_out' ? '처리 중...' : '퇴근 처리 + 평점 저장'}
-              </button>
-              <button type="button" onClick={() => setCheckoutTarget(null)}
-                className="px-4 py-2.5 border border-gray-300 text-gray-700 rounded-md text-sm hover:bg-gray-50">취소</button>
-            </div>
-          </div>
+    <div className="max-w-2xl mx-auto space-y-5 min-w-0">
+      <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <h2 className="text-xl font-semibold text-gray-800 break-words min-w-0">{detail.site_name}</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          {canCancelRequest && (
+            <button onClick={handleCancelRequest} disabled={cancellingRequest}
+              className="border border-red-300 text-red-600 px-3 py-1.5 rounded-md text-sm font-medium hover:bg-red-50 disabled:opacity-50">
+              {cancellingRequest ? '취소 중...' : '요청 취소'}
+            </button>
+          )}
+          <button onClick={() => navigate('/company')} className="text-sm text-gray-500 hover:text-gray-800">← 목록으로</button>
         </div>
-      )}
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-gray-800">{detail.site_name}</h2>
-        <button onClick={() => navigate('/company')} className="text-sm text-gray-500 hover:text-gray-800">← 목록으로</button>
       </div>
 
       {/* 상태 진행 표시 */}
@@ -197,10 +185,10 @@ export default function RequestDetailPage() {
       {/* 요청 정보 */}
       <div className="bg-white rounded-lg border border-gray-200 p-5">
         <h3 className="text-sm font-medium text-gray-500 mb-3">요청 정보</h3>
-        <div className="grid grid-cols-2 gap-4 text-sm">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
           <div><span className="text-gray-500">작업일</span><p className="font-medium text-gray-800">{detail.work_date}</p></div>
           <div><span className="text-gray-500">시작 시간</span><p className="font-medium text-gray-800">{detail.start_time}</p></div>
-          <div className="col-span-2"><span className="text-gray-500">위치</span><p className="font-medium text-gray-800">{detail.location_text}</p></div>
+          <div className="sm:col-span-2"><span className="text-gray-500">위치</span><p className="font-medium text-gray-800 break-words">{detail.location_text}</p></div>
           <div><span className="text-gray-500">총예산</span><p className="font-medium text-gray-800">{detail.budget.toLocaleString()}원</p></div>
           <div><span className="text-gray-500">우선순위</span><p className="font-medium text-gray-800 text-xs">비용 {PRIORITY_LABEL[detail.priority.cost]} / 경력 {PRIORITY_LABEL[detail.priority.career]} / 팀워크 {PRIORITY_LABEL[detail.priority.teamwork]}</p></div>
         </div>
@@ -220,8 +208,8 @@ export default function RequestDetailPage() {
               const canCheckout = member.worker_state === 'RUNNING' && showAttendance;
 
               return (
-                <div key={member.worker_id} className={`flex items-center justify-between text-sm py-2.5 px-3 rounded ${member.is_replacement ? 'bg-green-50 ring-1 ring-green-300' : 'bg-orange-50'}`}>
-                  <div className="flex items-center gap-2">
+                <div key={member.worker_id} className={`flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-sm py-2.5 px-3 rounded ${member.is_replacement ? 'bg-green-50 ring-1 ring-green-300' : 'bg-orange-50'}`}>
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
                     {member.is_replacement && (
                       <span className="text-xs bg-green-600 text-white px-1.5 py-0.5 rounded-full">신규 투입</span>
                     )}
@@ -240,7 +228,7 @@ export default function RequestDetailPage() {
                       <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full">🕒 도착 {member.eta}</span>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs text-gray-400">{member.offered_wage.toLocaleString()}원</span>
                     {canCheckin && (
                       <button onClick={() => handleCheckin(member.worker_id, member.name)}

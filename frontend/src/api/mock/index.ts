@@ -13,8 +13,12 @@ import type {
   RequiredTrade,
   Recommendation,
   GapEvent,
+  SpecReportRequest,
+  SpecReportJobState,
 } from '../types';
 import { SEED_ACCOUNTS, SEED_OFFICES, mockState, setCurrentUserId, getCurrentUserId, registerAccount } from './state';
+
+const mockReportJobs = new Map<string, SpecReportJobState>();
 
 export const handlers: Record<string, (body?: unknown, pathParam?: string) => Promise<ApiResponse<unknown>>> = {
   // === 인증 ===
@@ -224,7 +228,14 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     if (!crew) return { success: true, data: [] };
     const request = mockState.requests.find((r) => r.request_id === crew.request_id);
     if (!request) return { success: true, data: [] };
-    return { success: true, data: [{ crew_id: crew.crew_id, request_id: request.request_id, site_name: request.site_name, work_date: request.work_date, start_time: request.start_time, location_text: request.location_text, status: crew.status }] };
+    const member = crew.members.find((item) => item.worker_id === worker.worker_id);
+    return { success: true, data: [{
+      crew_id: crew.crew_id, request_id: request.request_id, site_name: request.site_name,
+      work_date: request.work_date, start_time: request.start_time, location_text: request.location_text,
+      status: crew.status, assigned_trade: member?.assigned_trade, offered_wage: member?.offered_wage || 0,
+      acceptance: member?.acceptance, is_replacement: member?.is_replacement || false, eta: member?.eta,
+      required_workers: request.required_workers, notes: request.notes,
+    }] };
   },
 
   // 배차완료(RESERVED) 취소 — 작업 시작 24시간 전까지 (C-8)
@@ -387,10 +398,10 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     return { success: true, data: mockState.workers[wIdx] };
   },
 
-  // 퇴근 처리 (company가 호출, body.rating: 1~5 별점 선택)
+  // 퇴근 처리
   'POST /company/crews/{crewId}/checkout/{workerId}': async (_body) => {
     await delay(200);
-    const { worker_id, rating } = (_body || {}) as { worker_id: string; rating?: number };
+    const { worker_id } = (_body || {}) as { worker_id: string };
     const wIdx = mockState.workers.findIndex((w) => w.worker_id === worker_id);
     if (wIdx < 0) return { success: false, error: { code: 'WORKER_NOT_FOUND', message: '근로자를 찾을 수 없습니다.' } };
     const worker = mockState.workers[wIdx];
@@ -404,19 +415,18 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
       request_id: reqForHistory.request_id,
       site_name: reqForHistory.site_name,
       work_date: reqForHistory.work_date,
+      start_time: reqForHistory.start_time,
+      location_text: reqForHistory.location_text,
+      company_name: Object.values(SEED_ACCOUNTS).find(
+        (account) => account.user.userId === reqForHistory.company_id,
+      )?.user.name,
+      required_workers: reqForHistory.required_workers,
+      notes: reqForHistory.notes,
       assigned_trade: memberForHistory.assigned_trade,
       offered_wage: memberForHistory.offered_wage,
       completed_at: now(),
     } : null;
-    // 별점(1~5) 반영: 평균/개수 갱신
-    let ratingCount = worker.rating_count || 0;
-    let ratingAvg = worker.rating ?? null;
-    if (typeof rating === 'number' && rating >= 1 && rating <= 5) {
-      const newCount = ratingCount + 1;
-      ratingAvg = Math.round(((ratingAvg ?? 0) * ratingCount + rating) / newCount * 10) / 10;
-      ratingCount = newCount;
-    }
-    mockState.workers[wIdx] = { ...worker, state: 'INACTIVE', current_crew_id: null, current_offer: null, completed_count: worker.completed_count + 1, rating: ratingAvg, rating_count: ratingCount, work_history: historyEntry ? [...worker.work_history, historyEntry] : worker.work_history, state_changed_at: now(), updated_at: now() };
+    mockState.workers[wIdx] = { ...worker, state: 'INACTIVE', current_crew_id: null, current_offer: null, completed_count: worker.completed_count + 1, work_history: historyEntry ? [...worker.work_history, historyEntry] : worker.work_history, state_changed_at: now(), updated_at: now() };
     // 전원 퇴근(INACTIVE) 시 crew→COMPLETED, request→COMPLETED
     const crew = mockState.crews.find((c) => c.crew_id === crewIdBeforeCheckout);
     if (crew) {
@@ -438,6 +448,90 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
   'GET /office/workers': async () => {
     await delay(150);
     return { success: true, data: mockState.workers.filter((w) => w.office_id === 'OFFICE001') };
+  },
+
+  'GET /office/workers/{workerId}': async (_body, workerId?: string) => {
+    await delay(120);
+    const worker = mockState.workers.find((item) => item.worker_id === workerId && item.office_id === 'OFFICE001');
+    if (!worker) return { success: false, error: { code: 'WORKER_NOT_FOUND', message: '소속 근로자를 찾을 수 없습니다.' } };
+    return { success: true, data: worker };
+  },
+
+  'POST /reports/spec-gap': async (body) => {
+    await delay(900);
+    const payload = body as SpecReportRequest;
+    const directCerts: Record<string, string[]> = {
+      건축목공시공: ['건축목공기능사'], 철근콘크리트시공: ['철근기능사', '거푸집기능사', '콘크리트기능사'],
+      조적미장시공: ['조적기능사', '미장기능사'], 타일석공시공: ['타일기능사', '석공기능사'],
+      방수시공: ['방수기능사', '방수산업기사'], 도장시공: ['건축도장기능사'], 비계시공: ['비계기능사'],
+      배관시공: ['배관기능사'], 용접: ['용접기능사'], 건설기계운전: ['굴착기운전기능사'],
+    };
+    const requirements = directCerts[payload.targetTrade] || [];
+    const matches = requirements.filter((name) => payload.certifications.includes(name));
+    const missing = matches.length === 0;
+    const nowValue = now();
+    const group = {
+      groupName: `${payload.targetTrade} 직접 자격`, importance: '핵심', selectionRule: '하나 이상',
+      certificationNames: requirements, matchedCertifications: matches, satisfied: !missing,
+    };
+    const priorityActions = missing ? [{ priority: 1, itemName: group.groupName, itemType: 'CERTIFICATION_GROUP', reason: `${requirements.join(', ')} 중 하나 이상 취득을 검토하세요.` }] : [];
+    const markdown = [
+      `# ${payload.targetTrade} 스펙 보완 보고서`, '', '## 종합 의견',
+      missing ? `핵심 자격그룹이 충족되지 않았습니다. ${requirements.join(', ')} 중 하나 이상을 검토하세요.` : `핵심 자격그룹을 충족했습니다: ${matches.join(', ')}`,
+      '', '## 분석 범위', `지원서 자격증 ${payload.certifications.length}개와 보유 능력 ${payload.abilities.length}개를 기준으로 분석했습니다.`,
+      '', '## 주의사항과 확인 필요 항목', '현재 화면은 mock 모드의 예시 보고서입니다. 운영 모드에서는 Bedrock Knowledge Base와 Q-Net 근거가 연결됩니다.',
+    ].join('\n');
+    return { success: true, data: {
+      report: {
+        reportId: `mock-${Date.now()}`, targetTrade: payload.targetTrade, targetSpecialty: payload.targetSpecialty || null,
+        analysisScope: '지원서 입력 기준',
+        normalizedCertifications: payload.certifications.map((name) => ({ inputName: name, normalizedName: name, matched: requirements.includes(name) })),
+        satisfiedCertificationGroups: missing ? [] : [group], missingCoreCertificationGroups: missing ? [group] : [],
+        recommendedCertificationGroups: [], abilityCoverage: { matched: 0, required: 0, percentage: 0 },
+        matchedAbilities: [], missingAbilities: [], priorityActions, limitations: ['mock 모드 예시 결과입니다.'],
+        humanReviewItems: [], generatedAt: nowValue,
+      }, markdown, persisted: false,
+    } };
+  },
+
+  'POST /reports/spec-gap/jobs': async (body) => {
+    const reportId = `mock-${Date.now()}`;
+    mockReportJobs.set(reportId, { reportId, status: 'PROCESSING' });
+    void handlers['POST /reports/spec-gap'](body).then((response) => {
+      if (response.success) {
+        const completed = response.data as { report: SpecReportJobState['report']; markdown?: string };
+        mockReportJobs.set(reportId, {
+          reportId,
+          status: 'COMPLETED',
+          report: completed.report ? { ...completed.report, reportId } : undefined,
+          markdown: completed.markdown,
+          persisted: true,
+        });
+      } else {
+        mockReportJobs.set(reportId, { reportId, status: 'FAILED', error: response.error });
+      }
+    });
+    return { success: true, data: { reportId, status: 'PROCESSING' } };
+  },
+
+  'GET /reports/spec-gap/jobs/{reportId}': async (_body, reportId?: string) => {
+    const job = reportId ? mockReportJobs.get(reportId) : undefined;
+    if (!job) return { success: false, error: { code: 'REPORT_NOT_FOUND', message: '저장된 보고서를 찾을 수 없습니다.' } };
+    return { success: true, data: job };
+  },
+
+  'GET /reports/spec-gap/jobs': async () => {
+    const jobs = [...mockReportJobs.values()]
+      .map((job) => ({
+        reportId: job.reportId || '',
+        targetTrade: job.report?.targetTrade || '분석 중',
+        status: job.status,
+        createdAt: job.report?.generatedAt,
+        completedAt: job.status === 'COMPLETED' ? job.report?.generatedAt : undefined,
+        errorCode: job.error?.code,
+      }))
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    return { success: true, data: jobs };
   },
 
   'GET /office/requests': async () => {
@@ -470,10 +564,24 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     const reqIdx = mockState.requests.findIndex((r) => r.request_id === requestId);
     if (reqIdx < 0) return { success: false, error: { code: 'REQUEST_NOT_FOUND', message: '요청을 찾을 수 없습니다.' } };
     const req = mockState.requests[reqIdx];
-    if (req.status !== 'REQUESTED') return { success: false, error: { code: 'STATE_CONFLICT', message: '이미 처리된 요청입니다.' } };
+    if (!['REQUESTED', 'COMPOSING', 'PROPOSED', 'APPROVED'].includes(req.status)) {
+      return { success: false, error: { code: 'STATE_CONFLICT', message: '작업 시작 전 요청만 거절할 수 있습니다.' } };
+    }
     mockState.requests[reqIdx] = { ...req, status: 'REJECTED', rejection_reason: reason, updated_at: now() };
     pushNotification(req.company_id, 'REQUEST_REJECTED', '요청 거절', `"${req.site_name}" 요청이 거절되었습니다. 사유: ${reason}`);
     return { success: true, data: mockState.requests[reqIdx] };
+  },
+  'POST /company/requests/{id}/cancel': async (_body, requestId?: string) => {
+    const request = mockState.requests.find((item) => item.request_id === requestId);
+    if (!request) return { success: false, error: { code: 'REQUEST_NOT_FOUND', message: '요청을 찾을 수 없습니다.' } };
+    if (['RUNNING', 'COMPLETED', 'CANCELLED', 'REJECTED'].includes(request.status)) {
+      return { success: false, error: { code: 'STATE_CONFLICT', message: '작업 시작 전 요청만 취소할 수 있습니다.' } };
+    }
+    request.status = 'CANCELLED';
+    request.updated_at = new Date().toISOString();
+    const crew = mockState.crews.find((item) => item.request_id === requestId && item.status !== 'CANCELLED');
+    if (crew) crew.status = 'CANCELLED';
+    return { success: true, data: request };
   },
 
   // office가 무응답 worker 제안 취소
@@ -696,8 +804,9 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     // 거절한 근로자는 후보에서 제외
     const declinedIds = request.declined_worker_ids || [];
     const readyCandidates = mockState.workers.filter((w) => w.state === 'READY' && w.office_id === 'OFFICE001' && !declinedIds.includes(w.worker_id));
-    if (readyCandidates.length < request.required_workers.reduce((s, rw) => s + rw.count, 0)) {
-      return { success: false, error: { code: 'AGENT_RETRY_FAILED', message: 'READY 상태 후보가 부족하여 AI 편성에 실패했습니다. 수동 편성으로 진행해주세요.' } };
+    const requiredCount = request.required_workers.reduce((s, rw) => s + rw.count, 0);
+    if (readyCandidates.length < requiredCount) {
+      return { success: false, error: { code: 'AGENT_RETRY_FAILED', message: `편성에 필요한 인원은 ${requiredCount}명이지만 현재 대기 중인 후보는 ${readyCandidates.length}명입니다. 근로자 대기 상태와 필요 인원을 확인해주세요.` } };
     }
 
     // 간단한 mock 추천 생성: 후보를 셔플해서 3안 만들기
@@ -728,17 +837,21 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
         }
       }
 
-      // 인원 충족 + 예산 이내 + 중복 조합 아닌 것만 추가
+      // 인원 충족 조합은 예산 초과여도 임금 조정 후보로 제공한다.
       const withinBudget = request.budget <= 0 || costTotal <= request.budget;
       const isDuplicate = recommendations.some((r) => r.member_ids.slice().sort().join(',') === members.map((m) => m.worker_id).sort().join(','));
-      if (members.length >= totalNeeded && withinBudget && !isDuplicate) {
-        const reasons = ['필수 직종 구성 충족', '예산 범위 내', rankCounter === 1 ? '최저 비용 우선' : '경력 균형'];
+      if (members.length >= totalNeeded && !isDuplicate) {
+        const excess = Math.max(0, costTotal - request.budget);
+        const budgetReason = withinBudget ? '예산 범위 내' : `⚠ 예산 ${excess.toLocaleString()}원 초과 — 임금 수정 필요`;
+        const reasons = ['필수 직종 구성 충족', budgetReason, rankCounter === 1 ? '최저 비용 우선' : '경력 균형'];
         recommendations.push({
           rank: rankCounter,
           member_ids: members.map((m) => m.worker_id),
           members,
           total_cost: costTotal,
-          reason: `${reasons.join(', ')} 기준으로 구성한 ${rankCounter}안입니다.`,
+          reason: withinBudget
+            ? `${reasons.join(', ')} 기준으로 구성한 ${rankCounter}안입니다.`
+            : `${budgetReason}. 필요한 직종과 인원은 충족하므로 임금을 조정한 뒤 승인할 수 있습니다.`,
           considerations: reasons,
           fitness: computeFitness(members, request.budget, request.priority),
         });
@@ -747,7 +860,7 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     }
 
     if (recommendations.length === 0) {
-      return { success: false, error: { code: 'AGENT_RETRY_FAILED', message: '예산 범위 내에서 가능한 조합을 찾지 못했습니다. 예산을 조정하거나 수동 편성으로 진행해주세요.' } };
+      return { success: false, error: { code: 'AGENT_RETRY_FAILED', message: '각 직종 후보는 있으나 한 근로자를 중복 배정하지 않고 모든 조건을 동시에 충족하는 조합이 없습니다. 필요 인원이나 직종 조건을 조정해주세요.' } };
     }
 
     // 기존 crew 정리 (재편성 시 옛 거절 crew 제거)
@@ -916,7 +1029,7 @@ export const handlers: Record<string, (body?: unknown, pathParam?: string) => Pr
     if (recommendations.length === 0) {
       // 실패 → FAILED
       mockState.gapEvents[evIdx] = { ...mockState.gapEvents[evIdx], status: 'FAILED', updated_at: now() };
-      return { success: false, error: { code: 'AGENT_RETRY_FAILED', message: '대체 가능한 인력을 찾지 못했습니다. 수동 편성 또는 편성 취소가 필요합니다.' } };
+      return { success: false, error: { code: 'AGENT_RETRY_FAILED', message: '현재 조건에서 대체 가능한 근로자를 찾지 못했습니다. 근로자 대기 상태를 확인하거나 수동 편성을 이용해주세요.' } };
     }
 
     // PROPOSED 전이 + 추천 저장
@@ -1137,6 +1250,8 @@ function applyApplicationFields(payload: WorkerApplicationRequest) {
     region: payload.region,
     desired_daily_wage: payload.desired_daily_wage,
     certifications: payload.certifications,
+    abilities: payload.abilities || [],
+    introduction: payload.introduction || '',
   };
 }
 

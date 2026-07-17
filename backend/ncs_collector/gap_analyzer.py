@@ -68,7 +68,10 @@ def analyze_gap(applicant: ApplicantSpecInput, repository: RuleRepository) -> St
         group for group in group_decisions
         if not group.satisfied and group.importance in _CORE_IMPORTANCE
     ]
-    recommended = [group for group in group_decisions if group.importance not in _CORE_IMPORTANCE]
+    recommended = [
+        group for group in group_decisions
+        if not group.satisfied and group.importance not in _CORE_IMPORTANCE
+    ]
     matched_abilities = [item for item in ability_decisions if item.matched]
     missing_abilities = [item for item in ability_decisions if not item.matched]
     required = len(ability_decisions)
@@ -87,7 +90,7 @@ def analyze_gap(applicant: ApplicantSpecInput, repository: RuleRepository) -> St
             priority=len(actions) + 1,
             item_name=ability.ability_name,
             item_type="ABILITY",
-            reason=f"직종 요구 NCS 능력 보완 ({ability.ncs_code})",
+            reason="직종에서 요구하는 능력 보완",
         ))
     for group in recommended:
         if not group.satisfied:
@@ -98,10 +101,13 @@ def analyze_gap(applicant: ApplicantSpecInput, repository: RuleRepository) -> St
                 reason="추천·관련 자격그룹 검토",
             ))
 
-    scope = "채용공고 기준 포함 분석" if applicant.job_posting_text else "일반적인 직종 기준 분석"
+    scope = "일반적인 직종 기준 분석"
     review_items: list[str] = []
     limitations = ["자격 및 능력 판정은 제공된 구조화 규칙의 현재 버전을 기준으로 한다."]
-    if not applicant.job_posting_text:
+    if applicant.job_posting_text:
+        review_items.append("채용공고 원문은 구조화 판정에 사용하지 않았으며 별도 사람 확인이 필요하다.")
+        limitations.append("채용공고 원문은 비신뢰 데이터로 보존되며 현재 구조화 규칙에 없는 요구사항은 자동 판정하지 않았다.")
+    else:
         limitations.append("채용공고가 제공되지 않아 개별 공고의 요구사항은 반영하지 않았다.")
     if not applicant.target_specialty and any(term in target_trade for term in _SPECIALTY_SENSITIVE_TERMS):
         review_items.append("세부 작업(targetSpecialty)이 없어 세부 작업별 자격 요건은 확인이 필요하다.")

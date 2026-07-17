@@ -16,7 +16,7 @@ from ncs_collector.models import (
 )
 from ncs_collector.trade_requirements import RuleRepository
 from spec_report.qnet import QNetQualificationService
-from spec_report.rendering import build_fallback_report, render_markdown
+from spec_report.rendering import build_fallback_report, materialize_agent_report, render_markdown
 from spec_report.report_agent import ReportAgentRunner, ReportAgentUnavailable
 from spec_report.retrieval import RequirementRetriever
 from spec_report.validator import ReportValidationError, missing_evidence_items, validate_report
@@ -40,6 +40,7 @@ def build_evidence_plan(
             continue
         plan.append({
             "action": "KB",
+            "targetTrade": structured.target_trade,
             "itemName": group.group_name,
             "itemType": "CERTIFICATION",
             "query": f"{structured.target_trade} {group.group_name} 자격 요건 근거",
@@ -48,6 +49,7 @@ def build_evidence_plan(
     for ability in structured.missing_abilities:
         plan.append({
             "action": "KB",
+            "targetTrade": structured.target_trade,
             "itemName": ability.ability_name,
             "itemType": "ABILITY",
             "ncsCode": ability.ncs_code,
@@ -69,6 +71,7 @@ def build_evidence_plan(
             metadata = normalizer.normalize(name)
             plan.append({
                 "action": "QNET",
+                "targetTrade": structured.target_trade,
                 "itemName": name,
                 "itemType": "CERTIFICATION",
                 "qnetUrl": metadata.qnet_url or "",
@@ -134,42 +137,90 @@ class SpecReportService:
         offline: bool = False,
         refresh_qnet: bool = False,
         json_only: bool = False,
+        report_id: str | None = None,
     ) -> tuple[SpecGapReport, str | None, dict[str, str]]:
         started = time.monotonic()
         structured = analyze_gap(applicant, self.repository)
         plan = build_evidence_plan(structured, self.repository, include_qnet=not offline)
         report: SpecGapReport | None = None
         first_error: str | None = None
+        kb_results: dict[str, RequirementEvidenceResult] = {}
+        qnet_results: dict[str, QualificationEvidence] = {}
+        retry_allowed = True
 
-        # First pass gives the Strands agent the opportunity to call its two tools.
+        # First pass must obtain evidence through plan-bound Strands tools. Claims are
+        # validated only against evidence actually observed from those calls.
         if not offline and self.agent_runner is not None:
             try:
-                candidate = self.agent_runner.run(structured, plan)
-                validate_report(candidate, structured)
-                if not missing_evidence_items(candidate, plan):
-                    report = candidate
-            except (ReportAgentUnavailable, ReportValidationError) as exc:
+                draft = self.agent_runner.run(structured, plan)
+                kb_results.update(self.agent_runner.last_kb_results)
+                qnet_results.update(self.agent_runner.last_qnet_results)
+                candidate = materialize_agent_report(
+                    structured, draft, kb_results, qnet_results
+                )
+                validate_report(candidate, structured, kb_results, qnet_results, plan)
+                missing = missing_evidence_items(candidate, plan)
+                if missing:
+                    raise ReportValidationError([
+                        "agent omitted planned evidence: "
+                        + ", ".join(item["itemName"] for item in missing)
+                    ])
+                report = candidate
+            except ReportAgentUnavailable as exc:
+                kb_results.update(self.agent_runner.last_kb_results)
+                qnet_results.update(self.agent_runner.last_qnet_results)
                 first_error = str(exc)
+                retry_allowed = False
+                logger.warning("spec_report_agent_attempt_failed attempt=1 reason=%s", first_error)
+            except ReportValidationError as exc:
+                kb_results.update(self.agent_runner.last_kb_results)
+                qnet_results.update(self.agent_runner.last_qnet_results)
+                first_error = str(exc)
+                logger.warning("spec_report_agent_attempt_failed attempt=1 reason=%s", first_error)
 
-        kb_results, qnet_results = self._collect(
-            structured, plan, refresh_qnet=refresh_qnet
+        pending_plan = [
+            item for item in plan
+            if (
+                item["action"] == "KB" and item["itemName"] not in kb_results
+            ) or (
+                item["action"] == "QNET" and item["itemName"] not in qnet_results
+            )
+        ]
+        collected_kb, collected_qnet = self._collect(
+            structured, pending_plan, refresh_qnet=refresh_qnet
         )
+        kb_results.update(collected_kb)
+        qnet_results.update(collected_qnet)
 
-        # One bounded retry with deterministically collected evidence; never loop.
-        if report is None and not offline and self.agent_runner is not None:
+        # One bounded retry with deterministically collected missing evidence; never loop.
+        if report is None and retry_allowed and not offline and self.agent_runner is not None:
             try:
-                candidate = self.agent_runner.run(
+                draft = self.agent_runner.run(
                     structured, plan, _serialize_evidence(kb_results, qnet_results)
                 )
-                validate_report(candidate, structured)
+                kb_results.update(self.agent_runner.last_kb_results)
+                qnet_results.update(self.agent_runner.last_qnet_results)
+                candidate = materialize_agent_report(
+                    structured, draft, kb_results, qnet_results
+                )
+                validate_report(candidate, structured, kb_results, qnet_results, plan)
+                missing = missing_evidence_items(candidate, plan)
+                if missing:
+                    raise ReportValidationError([
+                        "agent retry omitted planned evidence: "
+                        + ", ".join(item["itemName"] for item in missing)
+                    ])
                 report = candidate
             except (ReportAgentUnavailable, ReportValidationError) as exc:
                 first_error = first_error or str(exc)
+                logger.warning("spec_report_agent_attempt_failed attempt=2 reason=%s", str(exc))
 
         if report is None:
             extras = ["LLM 보고서 작성 실패로 구조화 결과 기반 보고서를 생성했다."] if first_error else []
             report = build_fallback_report(structured, kb_results, qnet_results, extra_limitations=extras)
-        validate_report(report, structured)
+        if report_id:
+            report.report_id = report_id
+        validate_report(report, structured, kb_results, qnet_results, plan)
 
         markdown = None if json_only else render_markdown(report)
         stored: dict[str, str] = {}

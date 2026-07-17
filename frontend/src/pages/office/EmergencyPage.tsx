@@ -49,6 +49,7 @@ export default function EmergencyPage() {
     const evRes = await api.get<GapEvent>(`/office/gap-events/${eventId}`);
     if (evRes.success) {
       setGapEvent(evRes.data);
+      setAiLoading(evRes.data.status === 'RECOMPOSING');
       const [reqRes, workersRes] = await Promise.all([
         api.get<RequestDetail>(`/office/requests/${evRes.data.request_id}`),
         api.get<Worker[]>('/office/workers'),
@@ -63,14 +64,20 @@ export default function EmergencyPage() {
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => {
+    if (!aiLoading) return;
+    const timer = window.setInterval(load, 3000);
+    return () => window.clearInterval(timer);
+  }, [aiLoading, load]);
+
   const handleAiRecompose = async () => {
     setAiLoading(true);
     const res = await api.post<GapEvent>(`/office/gap-events/${eventId}/agent-recompose`);
-    setAiLoading(false);
     if (res.success) {
-      setGapEvent(res.data);
       setSelectedRank(0);
+      await load();
     } else {
+      setAiLoading(false);
       toast.error(res.error.message);
       load();
     }
