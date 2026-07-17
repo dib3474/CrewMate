@@ -74,8 +74,7 @@ export default function OfficeRequestDetailPage() {
     }
   };
 
-  const handleCancelOffer = async (workerId: string, workerName: string) => {
-    if (!confirm(`${workerName}님의 제안을 취소하시겠습니까?\n취소 시 해당 근로자는 다시 대기 상태가 되며, 빈 자리는 재편성이 필요합니다.`)) return;
+  const cancelOffer = async (workerId: string, workerName: string) => {
     setCancellingWorker(workerId);
     const res = await api.post('/office/cancel-offer', { worker_id: workerId });
     setCancellingWorker(null);
@@ -85,6 +84,33 @@ export default function OfficeRequestDetailPage() {
     } else {
       toast.error(res.error.message);
     }
+  };
+
+  const handleCancelOffer = (workerId: string, workerName: string) => {
+    toast.custom((notification) => (
+      <div className="w-[min(92vw,420px)] rounded-xl border border-red-100 bg-white p-4 shadow-lg">
+        <p className="text-sm font-semibold text-gray-900">{workerName}님의 제안을 취소할까요?</p>
+        <p className="mt-1 text-xs leading-5 text-gray-500">
+          취소하면 근로자는 다시 대기 상태가 되며, 빈 자리는 재편성이 필요합니다.
+        </p>
+        <div className="mt-3 flex justify-end gap-2">
+          <button type="button" onClick={() => toast.dismiss(notification.id)}
+            className="rounded-md border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50">
+            닫기
+          </button>
+          <button type="button" onClick={() => {
+            toast.dismiss(notification.id);
+            void cancelOffer(workerId, workerName);
+          }} className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700">
+            제안 취소
+          </button>
+        </div>
+      </div>
+    ), {
+      id: `cancel-offer-${workerId}`,
+      duration: Infinity,
+      position: 'top-center',
+    });
   };
 
   const handleAiCompose = async () => {
